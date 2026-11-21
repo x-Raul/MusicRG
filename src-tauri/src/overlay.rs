@@ -915,10 +915,10 @@ const OSD_OUT: f32 = 0.22; // salida
 const OSD_SHOWN: f32 = OSD_LOCK_DELAY + OSD_LOCK + OSD_HOLD;
 
 /// Grillete abierto: cuánto sube (unidades del candado) y cuánto gira (grados).
-const SHACKLE_LIFT: f32 = 2.6;
+const SHACKLE_LIFT: f32 = 1.7;
 const SHACKLE_ANGLE: f32 = -32.0;
 /// Pie izquierdo del grillete: el eje sobre el que gira al abrirse.
-const SHACKLE_X: f32 = 3.6;
+const SHACKLE_X: f32 = 3.3;
 const SHACKLE_FOOT: f32 = 2.5;
 
 /// Solo en desarrollo: MUSICRG_OSD_SLOW=10 reproduce la animación 10 veces
@@ -1171,7 +1171,7 @@ impl Osd {
         let k = s * 0.92 * (1.0 + pose.bump);
         let lock_tf = Matrix3x2::scale(k, k)
             * Matrix3x2::rotation(pose.wiggle)
-            * Matrix3x2::translation(m + pad + 8.0 * s, cy + 0.5 * s)
+            * Matrix3x2::translation(m + pad + 8.0 * s, cy - 0.6 * s)
             * card_tf;
         let color = mix(rgba(fg, 0.9), self.accent, pose.accent);
 
@@ -1203,7 +1203,7 @@ impl Osd {
 unsafe fn shackle_geometry(gfx: &Gfx) -> Option<ID2D1PathGeometry> {
     let geo = gfx.d2d.CreatePathGeometry().ok()?;
     let sink = geo.Open().ok()?;
-    let top = -4.5;
+    let top = -2.4; // arco bajo: el grillete asoma poco sobre el cuerpo
     sink.BeginFigure(Vector2 { X: -SHACKLE_X, Y: SHACKLE_FOOT }, D2D1_FIGURE_BEGIN_HOLLOW);
     sink.AddLine(Vector2 { X: -SHACKLE_X, Y: top });
     sink.AddArc(&D2D1_ARC_SEGMENT {
