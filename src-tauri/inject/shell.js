@@ -50,6 +50,68 @@
     },
   };
 
+  // Ventana sin barra de título: botones propios arriba a la derecha y la
+  // franja superior de la página sirve para arrastrar (doble clic = maximizar).
+  const ctl = (action) => {
+    try {
+      const ipc = window.__TAURI_INTERNALS__;
+      if (ipc) ipc.invoke("window_ctl", { action }).catch(() => {});
+    } catch (_) {}
+  };
+  const DRAG_H = 32;
+  let host = null;
+  const mountChrome = () => {
+    if (host && host.isConnected) return;
+    host = document.createElement("div");
+    host.style.cssText = "position:fixed;top:0;right:0;z-index:2147483647;display:flex;";
+    // Shadow DOM: los estilos de Apple no le afectan y viceversa.
+    const root = host.attachShadow({ mode: "closed" });
+    const css = new CSSStyleSheet();
+    css.replaceSync(`
+      button { all: unset; width: 46px; height: ${DRAG_H}px; display: grid; place-items: center;
+        font: 10px "Segoe Fluent Icons", "Segoe MDL2 Assets"; color: rgba(255,255,255,.85); }
+      button:hover { background: rgba(255,255,255,.08); }
+      button:active { background: rgba(255,255,255,.05); }
+      button.x:hover { background: #c42b1c; color: #fff; }
+      button.x:active { background: #b22a1b; }
+    `);
+    root.adoptedStyleSheets = [css];
+    const btn = (action, glyph, label, cls) => {
+      const b = document.createElement("button");
+      b.textContent = glyph;
+      b.title = label;
+      b.setAttribute("aria-label", label);
+      if (cls) b.className = cls;
+      b.addEventListener("click", () => ctl(action));
+      root.append(b);
+      return b;
+    };
+    btn("minimize", "", "Minimize");
+    const max = btn("maximize", "", "Maximize");
+    btn("close", "", "Close", "x");
+    const sync = () => {
+      const full = outerWidth >= screen.availWidth && outerHeight >= screen.availHeight;
+      max.textContent = full ? "" : "";
+      max.title = full ? "Restore" : "Maximize";
+    };
+    addEventListener("resize", sync);
+    sync();
+    document.documentElement.append(host);
+  };
+  if (document.documentElement) mountChrome();
+  document.addEventListener("DOMContentLoaded", mountChrome);
+  document.addEventListener(
+    "mousedown",
+    (e) => {
+      if (e.button !== 0 || e.clientY >= DRAG_H || e.target === host) return;
+      const t = e.target instanceof Element ? e.target : null;
+      if (t && t.closest("a,button,input,textarea,select,label,[role=button],[role=link],[role=slider],[contenteditable]")) return;
+      e.preventDefault();
+      ctl(e.detail === 2 ? "maximize" : "drag");
+    },
+    true,
+  );
+
   // "Sonando ahora" para el widget de la barra de tareas (lo dibuja Rust).
   // Todo por eventos, nada de sondeo:
   // - play/pausa: eventos del propio <audio>/<video> (capturados en document,

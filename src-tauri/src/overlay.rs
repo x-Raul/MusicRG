@@ -119,8 +119,8 @@ unsafe fn thread_main(widget_on: bool, caps_on: bool, on_click: Box<dyn Fn() + S
         CreateWindowExW(ex, class, title, WS_POPUP, 0, 0, 1, 1, None, None, Some(hinst.into()), None)
     };
     let (Ok(wh), Ok(oh)) = (
-        make(ex, w!("MusicRG - sonando ahora")),
-        make(ex | WS_EX_TRANSPARENT, w!("MusicRG - Bloq Mayus")),
+        make(ex, w!("MusicRG - now playing")),
+        make(ex | WS_EX_TRANSPARENT, w!("MusicRG - Caps Lock")),
     ) else {
         return;
     };
@@ -919,7 +919,7 @@ impl Osd {
                 (1.0, r)
             }
         };
-        let label = if on { "Bloq Mayús activado" } else { "Bloq Mayús desactivado" };
+        let label = if on { "Caps Lock on" } else { "Caps Lock off" };
         let glyph = if on { "\u{E72E}" } else { "\u{E785}" };
         let (Some(text), Some(icon)) = (
             gfx.layout(label, &gfx.ui, 13.0 * s, DWRITE_FONT_WEIGHT_NORMAL, 400.0 * s),
@@ -927,11 +927,11 @@ impl Osd {
         ) else {
             return;
         };
-        let pad = 16.0 * s;
+        let pad = 14.0 * s;
         let icon_w = 16.0 * s;
-        let gap = 12.0 * s;
-        let w = (pad + icon_w + gap + text_width(&text) + pad + 4.0 * s).ceil() as i32;
-        let h = (52.0 * s).round() as i32;
+        let gap = 9.0 * s;
+        let w = (pad + icon_w + gap + text_width(&text) + pad).ceil() as i32;
+        let h = (44.0 * s).round() as i32;
         self.surf.resize(w, h);
         let (wf, hf) = (w as f32, h as f32);
         let fg = theme.fg();
@@ -946,10 +946,10 @@ impl Osd {
         let cy = hf / 2.0 - 3.0 * s;
         self.surf.text(&icon, pad, cy - 10.0 * s, rgba(fg, 0.9));
         self.surf.text(&text, pad + icon_w + gap, cy - 9.5 * s, rgba(fg, 0.95));
-        // Pastilla de estado bajo el texto: acento si está activado.
-        let pill_w = 22.0 * s;
-        let px = pad + icon_w + gap;
-        let pill = rrect(px, hf - 10.0 * s, px + pill_w, hf - 7.0 * s, 1.5 * s);
+        // Pastilla de estado centrada abajo: acento si está activado.
+        let pill_w = 40.0 * s;
+        let px = (wf - pill_w) / 2.0;
+        let pill = rrect(px, hf - 9.0 * s, px + pill_w, hf - 6.0 * s, 1.5 * s);
         let mut c = theme.accent;
         if !on {
             c = rgba(fg, 0.3);

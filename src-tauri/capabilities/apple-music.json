@@ -1,10 +1,10 @@
 {
   "$schema": "../gen/schemas/remote-schema.json",
   "identifier": "apple-music",
-  "description": "music.apple.com solo puede avisar de la cancion que suena (widget de la barra de tareas).",
+  "description": "music.apple.com solo puede avisar de la cancion que suena (widget) y usar los botones propios de la ventana.",
   "windows": ["main"],
   "remote": {
     "urls": ["https://music.apple.com/*"]
   },
-  "permissions": ["allow-now-playing"]
+  "permissions": ["allow-now-playing", "allow-window-ctl"]
 }

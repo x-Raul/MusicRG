@@ -52,6 +52,13 @@ body {
   outline-offset: 2px;
 }
 
+/* Sin barra de título: los botones de la ventana ocupan la esquina superior
+   derecha (138 x 32 px). Los botones de compartir / "más" de álbumes y
+   playlists bajan un poco para no quedar debajo. */
+.cloud-buttons {
+  top: 34px !important;
+}
+
 /* --- Ahorro de recursos --- */
 
 /* El desenfoque de fondo es lo más caro de pintar en la GPU. */

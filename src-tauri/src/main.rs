@@ -46,10 +46,25 @@ fn now_playing(overlay: tauri::State<Overlay>, playing: bool, title: String, art
     overlay.now_playing(NowPlaying { playing, title: clip(title), artist: clip(artist), art: clip(art) });
 }
 
+/// Botones propios de la ventana (no hay barra de título nativa). Solo estas
+/// cuatro acciones: la página no recibe acceso general a la API de ventanas.
+#[tauri::command]
+fn window_ctl(window: WebviewWindow, action: String) {
+    let _ = match action.as_str() {
+        "minimize" => window.minimize(),
+        "maximize" if window.is_maximized().unwrap_or(false) => window.unmaximize(),
+        "maximize" => window.maximize(),
+        // Igual que la X nativa: pasa por CloseRequested y se esconde en la bandeja.
+        "close" => window.close(),
+        "drag" => window.start_dragging(),
+        _ => Ok(()),
+    };
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)))
-        .invoke_handler(tauri::generate_handler![now_playing])
+        .invoke_handler(tauri::generate_handler![now_playing, window_ctl])
         .setup(|app| {
             let config_dir = app.path().config_dir().ok();
             let prefs = config_dir
@@ -64,8 +79,8 @@ fn main() {
             if std::env::var_os("MUSICRG_DEMO").is_some() {
                 app.state::<Overlay>().now_playing(NowPlaying {
                     playing: true,
-                    title: "Dark Dream (Demo de MusicRG)".into(),
-                    artist: "Artista de prueba".into(),
+                    title: "Dark Dream (MusicRG demo)".into(),
+                    artist: "Test artist".into(),
                     art: std::env::var("MUSICRG_DEMO_ART").unwrap_or_default(),
                 });
             }
@@ -85,33 +100,36 @@ fn main() {
                 .inner_size(1180.0, 760.0)
                 .min_inner_size(420.0, 320.0)
                 .center()
+                // Sin barra de título: la página ocupa toda la ventana y
+                // shell.js pone los botones de minimizar / maximizar / cerrar.
+                .decorations(false)
+                .shadow(true)
                 .theme(Some(Theme::Dark))
                 .background_color(tauri::webview::Color(BG.0, BG.1, BG.2, 255))
                 .additional_browser_args(BROWSER_ARGS)
                 .initialization_script(&script)
                 .build()?;
-            paint_title_bar(&win);
             remember_browser_pid(&win);
 
             let widget_item = CheckMenuItem::with_id(
-                app, "widget", "Widget en la barra de tareas", true, prefs.widget, None::<&str>,
+                app, "widget", "Taskbar widget", true, prefs.widget, None::<&str>,
             )?;
             let caps_item = CheckMenuItem::with_id(
-                app, "caps", "Aviso de Bloq Mayús", true, prefs.caps, None::<&str>,
+                app, "caps", "Caps Lock toast", true, prefs.caps, None::<&str>,
             )?;
             let (wi, ci) = (widget_item.clone(), caps_item.clone());
             let menu = Menu::with_items(
                 app,
                 &[
-                    &MenuItem::with_id(app, "toggle", "Reproducir / Pausar", true, None::<&str>)?,
-                    &MenuItem::with_id(app, "next", "Siguiente", true, None::<&str>)?,
-                    &MenuItem::with_id(app, "prev", "Anterior", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "toggle", "Play / Pause", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "next", "Next", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "prev", "Previous", true, None::<&str>)?,
                     &PredefinedMenuItem::separator(app)?,
                     &widget_item,
                     &caps_item,
                     &PredefinedMenuItem::separator(app)?,
-                    &MenuItem::with_id(app, "show", "Mostrar MusicRG", true, None::<&str>)?,
-                    &MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "show", "Show MusicRG", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?,
                 ],
             )?;
             let mut tray = TrayIconBuilder::with_id("main")
@@ -156,7 +174,7 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Cerrar = esconder en la bandeja; la música sigue. "Salir" está en el menú.
+            // Cerrar = esconder en la bandeja; la música sigue. "Quit" está en el menú.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
@@ -166,7 +184,7 @@ fn main() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("no se pudo iniciar MusicRG");
+        .expect("failed to start MusicRG");
 }
 
 fn show(app: &AppHandle) {
@@ -175,23 +193,6 @@ fn show(app: &AppHandle) {
         let _ = win.unminimize();
         let _ = win.show();
         let _ = win.set_focus();
-    }
-}
-
-/// Windows 11: barra de título nativa del mismo color que la página, para que
-/// se fundan. En Windows 10 la llamada falla sin más y queda la barra oscura.
-#[cfg(windows)]
-fn paint_title_bar(win: &WebviewWindow) {
-    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR};
-    let Ok(hwnd) = win.hwnd() else { return };
-    let color: u32 = BG.0 as u32 | (BG.1 as u32) << 8 | (BG.2 as u32) << 16; // COLORREF 0x00BBGGRR
-    unsafe {
-        let _ = DwmSetWindowAttribute(
-            windows::Win32::Foundation::HWND(hwnd.0 as _),
-            DWMWA_CAPTION_COLOR,
-            &color as *const u32 as *const _,
-            std::mem::size_of::<u32>() as u32,
-        );
     }
 }
 
@@ -233,9 +234,6 @@ fn remember_browser_pid(win: &WebviewWindow) {
 
 #[cfg(not(windows))]
 fn remember_browser_pid(_: &WebviewWindow) {}
-
-#[cfg(not(windows))]
-fn paint_title_bar(_: &WebviewWindow) {}
 
 #[cfg(not(windows))]
 fn set_low_memory(_: &WebviewWindow, _: bool) {}
