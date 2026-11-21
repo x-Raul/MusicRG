@@ -48,6 +48,8 @@ enum Cmd {
     Widget(bool),
     Caps(bool),
     Art(String, Vec<u8>, u32),
+    #[cfg(debug_assertions)]
+    DemoOsd(bool),
 }
 
 struct Shared {
@@ -84,6 +86,11 @@ impl Overlay {
     }
     pub fn set_caps(&self, on: bool) {
         post(Cmd::Caps(on));
+    }
+    /// Solo en desarrollo: muestra el aviso de Bloq Mayús sin tocar la tecla.
+    #[cfg(debug_assertions)]
+    pub fn demo_osd(&self, on: bool) {
+        post(Cmd::DemoOsd(on));
     }
 }
 
@@ -256,6 +263,8 @@ impl State {
                 }
                 Cmd::Caps(on) => self.set_caps(on),
                 Cmd::Art(url, px, size) => self.widget.set_art(&url, &px, size),
+                #[cfg(debug_assertions)]
+                Cmd::DemoOsd(on) => self.osd.show(&self.gfx, &self.theme, on),
             }
         }
     }
@@ -301,7 +310,6 @@ struct Gfx {
     d2d: ID2D1Factory,
     dw: IDWriteFactory,
     ui: HSTRING,
-    icons: HSTRING,
 }
 
 impl Gfx {
@@ -321,7 +329,6 @@ impl Gfx {
         };
         Some(Self {
             ui: pick("Segoe UI Variable Text", "Segoe UI"),
-            icons: pick("Segoe Fluent Icons", "Segoe MDL2 Assets"),
             d2d,
             dw,
         })
@@ -893,21 +900,160 @@ impl Widget {
 
 // ---------------------------------------------------------------------------
 // Aviso de Bloq Mayús
+//
+// La tarjeta entra creciendo con un pequeño rebote y el candado está dibujado
+// con geometría (no es un glifo), así que el grillete puede moverse:
+// - activar:    el grillete abierto gira, baja y encaja con un "clic".
+// - desactivar: el grillete sube, gira hacia fuera y el candado se balancea.
+// Solo se redibuja mientras algo se mueve; en la pausa el hilo duerme.
 
-const OSD_IN: f32 = 0.12;
-const OSD_HOLD: f32 = 1.4;
-const OSD_OUT: f32 = 0.25;
+const OSD_POP: f32 = 0.34; // entrada de la tarjeta
+const OSD_LOCK_DELAY: f32 = 0.10; // el candado empieza cuando la tarjeta ya se ve
+const OSD_LOCK: f32 = 0.55; // animación del candado
+const OSD_HOLD: f32 = 1.1; // quieto en pantalla
+const OSD_OUT: f32 = 0.22; // salida
+const OSD_SHOWN: f32 = OSD_LOCK_DELAY + OSD_LOCK + OSD_HOLD;
+
+/// Grillete abierto: cuánto sube (unidades del candado) y cuánto gira (grados).
+const SHACKLE_LIFT: f32 = 2.6;
+const SHACKLE_ANGLE: f32 = -32.0;
+/// Pie izquierdo del grillete: el eje sobre el que gira al abrirse.
+const SHACKLE_X: f32 = 3.6;
+const SHACKLE_FOOT: f32 = 2.5;
+
+/// Solo en desarrollo: MUSICRG_OSD_SLOW=10 reproduce la animación 10 veces
+/// más lenta para poder verla fotograma a fotograma.
+#[cfg(debug_assertions)]
+fn osd_slow() -> f32 {
+    static SLOW: OnceLock<f32> = OnceLock::new();
+    *SLOW.get_or_init(|| {
+        std::env::var("MUSICRG_OSD_SLOW").ok().and_then(|v| v.parse().ok()).filter(|v: &f32| *v > 0.0).unwrap_or(1.0)
+    })
+}
+#[cfg(not(debug_assertions))]
+fn osd_slow() -> f32 {
+    1.0
+}
+
+fn clamp01(x: f32) -> f32 {
+    x.clamp(0.0, 1.0)
+}
+fn ease_out(x: f32) -> f32 {
+    1.0 - (1.0 - x).powi(3)
+}
+fn ease_in(x: f32) -> f32 {
+    x * x * x
+}
+fn ease_in_out(x: f32) -> f32 {
+    if x < 0.5 { 4.0 * x * x * x } else { 1.0 - (-2.0 * x + 2.0).powi(3) / 2.0 }
+}
+/// Se pasa un poco y vuelve: da la sensación de "pop".
+fn ease_out_back(x: f32) -> f32 {
+    let (c1, c3) = (1.70158, 2.70158);
+    1.0 + c3 * (x - 1.0).powi(3) + c1 * (x - 1.0).powi(2)
+}
+fn mix(a: D2D1_COLOR_F, b: D2D1_COLOR_F, k: f32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: a.r + (b.r - a.r) * k,
+        g: a.g + (b.g - a.g) * k,
+        b: a.b + (b.b - a.b) * k,
+        a: a.a + (b.a - a.a) * k,
+    }
+}
+
+/// Postura del candado en un instante.
+struct LockPose {
+    lift: f32,
+    angle: f32,
+    /// Balanceo de todo el candado (grados) al abrirse.
+    wiggle: f32,
+    /// "Clic" al cerrarse: el candado crece un poco y vuelve.
+    bump: f32,
+    /// 0 = color normal, 1 = color de acento (cerrado / activado).
+    accent: f32,
+}
+
+impl LockPose {
+    fn at(on: bool, u: f32) -> Self {
+        if on {
+            // Cerrar: gira de vuelta, baja y encaja.
+            let swing = ease_in_out(clamp01(u / 0.45));
+            let drop = ease_in(clamp01((u - 0.4) / 0.25));
+            let click = clamp01((u - 0.62) / 0.38);
+            Self {
+                angle: SHACKLE_ANGLE * (1.0 - swing),
+                lift: SHACKLE_LIFT * (1.0 - drop),
+                wiggle: 0.0,
+                bump: 0.16 * (std::f32::consts::PI * click).sin(),
+                accent: ease_out(click),
+            }
+        } else {
+            // Abrir: sube, gira hacia fuera con rebote y se balancea.
+            let w = clamp01((u - 0.5) / 0.5);
+            Self {
+                lift: SHACKLE_LIFT * ease_out(clamp01(u / 0.3)),
+                angle: SHACKLE_ANGLE * ease_out_back(clamp01((u - 0.18) / 0.5)),
+                wiggle: 9.0 * (w * std::f32::consts::TAU).sin() * (1.0 - w),
+                bump: 0.0,
+                accent: 1.0 - ease_out(clamp01(u / 0.3)),
+            }
+        }
+    }
+}
 
 struct Osd {
     surf: Surface,
     start: Option<Instant>,
     pos: (i32, i32),
     alpha: f32,
+    /// Estado nuevo de Bloq Mayús que se está mostrando.
+    on: bool,
+    /// Si la tarjeta entra creciendo (false = ya estaba en pantalla).
+    pop: bool,
+    s: f32,
+    margin: f32,
+    card: (f32, f32),
+    text: Option<IDWriteTextLayout>,
+    fg: u32,
+    bg: D2D1_COLOR_F,
+    accent: D2D1_COLOR_F,
+    shackle: Option<ID2D1PathGeometry>,
+    round: Option<ID2D1StrokeStyle>,
 }
 
 impl Osd {
     unsafe fn new(hwnd: HWND, gfx: &Gfx) -> Self {
-        Self { surf: Surface::new(hwnd, gfx), start: None, pos: (0, 0), alpha: 0.0 }
+        Self {
+            surf: Surface::new(hwnd, gfx),
+            start: None,
+            pos: (0, 0),
+            alpha: 0.0,
+            on: false,
+            pop: true,
+            s: 1.0,
+            margin: 0.0,
+            card: (0.0, 0.0),
+            text: None,
+            fg: 0xffffff,
+            bg: rgba(0x202020, 0.96),
+            accent: rgba(0xffffff, 1.0),
+            shackle: shackle_geometry(gfx),
+            round: gfx
+                .d2d
+                .CreateStrokeStyle(
+                    &D2D1_STROKE_STYLE_PROPERTIES {
+                        startCap: D2D1_CAP_STYLE_ROUND,
+                        endCap: D2D1_CAP_STYLE_ROUND,
+                        dashCap: D2D1_CAP_STYLE_ROUND,
+                        lineJoin: D2D1_LINE_JOIN_ROUND,
+                        miterLimit: 10.0,
+                        dashStyle: D2D1_DASH_STYLE_SOLID,
+                        dashOffset: 0.0,
+                    },
+                    None,
+                )
+                .ok(),
+        }
     }
 
     unsafe fn show(&mut self, gfx: &Gfx, theme: &Theme, on: bool) {
@@ -920,47 +1066,32 @@ impl Osd {
             }
         };
         let label = if on { "Caps Lock on" } else { "Caps Lock off" };
-        let glyph = if on { "\u{E72E}" } else { "\u{E785}" };
-        let (Some(text), Some(icon)) = (
-            gfx.layout(label, &gfx.ui, 13.0 * s, DWRITE_FONT_WEIGHT_NORMAL, 400.0 * s),
-            gfx.layout(glyph, &gfx.icons, 16.0 * s, DWRITE_FONT_WEIGHT_NORMAL, 40.0 * s),
-        ) else {
+        let Some(text) = gfx.layout(label, &gfx.ui, 13.0 * s, DWRITE_FONT_WEIGHT_NORMAL, 400.0 * s) else {
             return;
         };
-        let pad = 14.0 * s;
-        let icon_w = 16.0 * s;
-        let gap = 9.0 * s;
-        let w = (pad + icon_w + gap + text_width(&text) + pad).ceil() as i32;
-        let h = (44.0 * s).round() as i32;
+        let card_w = (14.0 + 16.0 + 9.0 + 14.0) * s + text_width(&text);
+        let card_h = 44.0 * s;
+        // Margen transparente para que el rebote (crece más del 100 %) no se corte.
+        let margin = (10.0 * s).ceil();
+        let w = (card_w + 2.0 * margin).ceil() as i32;
+        let h = (card_h + 2.0 * margin).ceil() as i32;
         self.surf.resize(w, h);
-        let (wf, hf) = (w as f32, h as f32);
-        let fg = theme.fg();
-        let rt = &self.surf.rt;
-        rt.BeginDraw();
-        rt.Clear(Some(&rgba(0, 0.0)));
-        let bg = if theme.light { rgba(0xf3f3f3, 0.97) } else { rgba(0x202020, 0.96) };
-        let card = rrect(0.5, 0.5, wf - 0.5, hf - 0.5, 8.0 * s);
-        self.surf.fill(&card, bg);
-        self.surf.brush.SetColor(&rgba(fg, 0.09));
-        rt.DrawRoundedRectangle(&card, &self.surf.brush, 1.0, None);
-        let cy = hf / 2.0 - 3.0 * s;
-        self.surf.text(&icon, pad, cy - 10.0 * s, rgba(fg, 0.9));
-        self.surf.text(&text, pad + icon_w + gap, cy - 9.5 * s, rgba(fg, 0.95));
-        // Pastilla de estado centrada abajo: acento si está activado.
-        let pill_w = 40.0 * s;
-        let px = (wf - pill_w) / 2.0;
-        let pill = rrect(px, hf - 9.0 * s, px + pill_w, hf - 6.0 * s, 1.5 * s);
-        let mut c = theme.accent;
-        if !on {
-            c = rgba(fg, 0.3);
-        }
-        self.surf.fill(&pill, c);
-        let _ = rt.EndDraw(None, None);
 
-        self.pos = ((work.left + work.right) / 2 - w / 2, work.bottom - h - (16.0 * s) as i32);
-        // Si ya estaba en pantalla, sin volver a entrar con fundido.
-        let skip_in = self.start.is_some() && self.alpha > 0.5;
-        self.start = Some(Instant::now() - if skip_in { Duration::from_secs_f32(OSD_IN) } else { Duration::ZERO });
+        self.s = s;
+        self.margin = margin;
+        self.card = (card_w.ceil(), card_h);
+        self.text = Some(text);
+        self.fg = theme.fg();
+        self.bg = if theme.light { rgba(0xf3f3f3, 0.97) } else { rgba(0x202020, 0.96) };
+        self.accent = theme.accent;
+        self.on = on;
+        // Si ya estaba en pantalla no vuelve a entrar: solo da un pequeño salto.
+        self.pop = !(self.start.is_some() && self.alpha > 0.5);
+        self.pos = (
+            (work.left + work.right) / 2 - w / 2,
+            work.bottom - h + margin as i32 - (16.0 * s) as i32,
+        );
+        self.start = Some(Instant::now());
         self.alpha = -1.0; // fuerza el primer present
         let _ = SetWindowPos(self.surf.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         self.tick();
@@ -969,25 +1100,121 @@ impl Osd {
 
     unsafe fn tick(&mut self) {
         let Some(start) = self.start else { return };
-        let t = start.elapsed().as_secs_f32();
-        let (alpha, next) = if t < OSD_IN {
-            (t / OSD_IN, 16)
-        } else if t < OSD_IN + OSD_HOLD {
-            // Durante la pausa no hace falta despertar cada frame.
-            (1.0, (((OSD_IN + OSD_HOLD - t) * 1000.0) as u32).max(1))
-        } else if t < OSD_IN + OSD_HOLD + OSD_OUT {
-            (1.0 - (t - OSD_IN - OSD_HOLD) / OSD_OUT, 16)
-        } else {
+        let t = start.elapsed().as_secs_f32() / osd_slow();
+        if t >= OSD_SHOWN + OSD_OUT {
             self.start = None;
             self.alpha = 0.0;
             let _ = KillTimer(Some(self.surf.hwnd), T_OSD);
             let _ = ShowWindow(self.surf.hwnd, SW_HIDE);
             return;
-        };
-        if (alpha - self.alpha).abs() > 0.001 {
-            self.alpha = alpha;
-            self.surf.present(self.pos.0, self.pos.1, alpha);
         }
+
+        // Tarjeta: escala, desplazamiento vertical y opacidad.
+        let (mut scale, mut alpha, mut rise) = if self.pop {
+            let k = clamp01(t / OSD_POP);
+            (0.72 + 0.28 * ease_out_back(k), ease_out(clamp01(k * 1.8)), 8.0 * self.s * (1.0 - ease_out(k)))
+        } else {
+            (1.0 + 0.04 * (std::f32::consts::PI * clamp01(t / 0.2)).sin(), 1.0, 0.0)
+        };
+        if t > OSD_SHOWN {
+            let k = clamp01((t - OSD_SHOWN) / OSD_OUT);
+            scale *= 1.0 - 0.08 * ease_in(k);
+            alpha *= 1.0 - k;
+            rise += 4.0 * self.s * ease_in(k);
+        }
+        let u = clamp01((t - OSD_LOCK_DELAY) / OSD_LOCK);
+        self.draw(scale, rise, &LockPose::at(self.on, u));
+        self.alpha = alpha;
+        self.surf.present(self.pos.0, self.pos.1, alpha);
+
+        // Entre el final de la animación y la salida no cambia nada: a dormir.
+        let still_from = OSD_LOCK_DELAY + OSD_LOCK;
+        let next = if t >= still_from && t < OSD_SHOWN {
+            (((OSD_SHOWN - t) * osd_slow() * 1000.0) as u32).max(1)
+        } else {
+            16
+        };
         SetTimer(Some(self.surf.hwnd), T_OSD, next, None);
     }
+
+    unsafe fn draw(&self, scale: f32, rise: f32, pose: &LockPose) {
+        let Some(text) = &self.text else { return };
+        let (s, m) = (self.s, self.margin);
+        let (cw, ch) = self.card;
+        let rt = &self.surf.rt;
+        let brush = &self.surf.brush;
+        let fg = self.fg;
+
+        rt.BeginDraw();
+        rt.SetTransform(&Matrix3x2::identity());
+        rt.Clear(Some(&rgba(0, 0.0)));
+        let center = Vector2 { X: m + cw / 2.0, Y: m + ch / 2.0 };
+        let card_tf = Matrix3x2::scale_around(scale, scale, center) * Matrix3x2::translation(0.0, rise);
+        rt.SetTransform(&card_tf);
+
+        let card = rrect(m + 0.5, m + 0.5, m + cw - 0.5, m + ch - 0.5, 8.0 * s);
+        self.surf.fill(&card, self.bg);
+        brush.SetColor(&rgba(fg, 0.09));
+        rt.DrawRoundedRectangle(&card, brush, 1.0, None);
+
+        let pad = 14.0 * s;
+        let cy = m + ch / 2.0 - 3.0 * s;
+        self.surf.text(text, m + pad + 16.0 * s + 9.0 * s, cy - 9.5 * s, rgba(fg, 0.95));
+
+        // Pastilla de estado: se alarga y toma el color de acento al activar.
+        let pill_w = (18.0 + 22.0 * pose.accent) * s;
+        let px = m + (cw - pill_w) / 2.0;
+        let pill = rrect(px, m + ch - 9.0 * s, px + pill_w, m + ch - 6.0 * s, 1.5 * s);
+        self.surf.fill(&pill, mix(rgba(fg, 0.3), self.accent, pose.accent));
+
+        // Candado en unidades propias (caja de ~16 x 16), escalado a la pantalla.
+        let k = s * 0.92 * (1.0 + pose.bump);
+        let lock_tf = Matrix3x2::scale(k, k)
+            * Matrix3x2::rotation(pose.wiggle)
+            * Matrix3x2::translation(m + pad + 8.0 * s, cy + 0.5 * s)
+            * card_tf;
+        let color = mix(rgba(fg, 0.9), self.accent, pose.accent);
+
+        // Grillete primero: las patas quedan tapadas por el cuerpo.
+        if let (Some(shackle), Some(round)) = (&self.shackle, &self.round) {
+            let pivot = Vector2 { X: -SHACKLE_X, Y: SHACKLE_FOOT - pose.lift };
+            rt.SetTransform(
+                &(Matrix3x2::translation(0.0, -pose.lift) * Matrix3x2::rotation_around(pose.angle, pivot) * lock_tf),
+            );
+            brush.SetColor(&color);
+            rt.DrawGeometry(shackle, brush, 1.9, round);
+        }
+        rt.SetTransform(&lock_tf);
+        self.surf.fill(&rrect(-6.0, -1.0, 6.0, 7.0, 2.0), color);
+        // Bocallave hueca, del color de la tarjeta.
+        brush.SetColor(&self.bg);
+        rt.FillEllipse(
+            &D2D1_ELLIPSE { point: Vector2 { X: 0.0, Y: 2.4 }, radiusX: 1.15, radiusY: 1.15 },
+            brush,
+        );
+        rt.FillRectangle(&D2D_RECT_F { left: -0.5, top: 2.4, right: 0.5, bottom: 4.6 }, brush);
+
+        rt.SetTransform(&Matrix3x2::identity());
+        let _ = rt.EndDraw(None, None);
+    }
+}
+
+/// Grillete en "U" invertida: dos patas y un arco por arriba.
+unsafe fn shackle_geometry(gfx: &Gfx) -> Option<ID2D1PathGeometry> {
+    let geo = gfx.d2d.CreatePathGeometry().ok()?;
+    let sink = geo.Open().ok()?;
+    let top = -4.5;
+    sink.BeginFigure(Vector2 { X: -SHACKLE_X, Y: SHACKLE_FOOT }, D2D1_FIGURE_BEGIN_HOLLOW);
+    sink.AddLine(Vector2 { X: -SHACKLE_X, Y: top });
+    sink.AddArc(&D2D1_ARC_SEGMENT {
+        point: Vector2 { X: SHACKLE_X, Y: top },
+        size: D2D_SIZE_F { width: SHACKLE_X, height: SHACKLE_X },
+        rotationAngle: 0.0,
+        sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+        arcSize: D2D1_ARC_SIZE_SMALL,
+    });
+    sink.AddLine(Vector2 { X: SHACKLE_X, Y: SHACKLE_FOOT });
+    sink.EndFigure(D2D1_FIGURE_END_OPEN);
+    sink.Close().ok()?;
+    Some(geo)
 }

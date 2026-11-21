@@ -63,11 +63,17 @@ fn window_ctl(window: WebviewWindow, action: String) {
 }
 
 fn main() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)))
+    // Solo en desarrollo: MUSICRG_OSD_DEMO=1 alterna el aviso de Bloq Mayús
+    // cada pocos segundos y deja convivir con la MusicRG instalada.
+    let osd_demo = cfg!(debug_assertions) && std::env::var_os("MUSICRG_OSD_DEMO").is_some();
+    let mut builder = tauri::Builder::default();
+    if !osd_demo {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)));
+    }
+    builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![now_playing, window_ctl])
-        .setup(|app| {
+        .setup(move |app| {
             let config_dir = app.path().config_dir().ok();
             let prefs = config_dir
                 .as_deref()
@@ -84,6 +90,20 @@ fn main() {
                     title: "Dark Dream (MusicRG demo)".into(),
                     artist: "Test artist".into(),
                     art: std::env::var("MUSICRG_DEMO_ART").unwrap_or_default(),
+                });
+            }
+            #[cfg(debug_assertions)]
+            if osd_demo {
+                let handle = app.handle().clone();
+                let slow: f32 = std::env::var("MUSICRG_OSD_SLOW").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+                std::thread::spawn(move || {
+                    let mut on = true;
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs_f32(1.0));
+                        handle.state::<Overlay>().demo_osd(on);
+                        std::thread::sleep(std::time::Duration::from_secs_f32(2.2 * slow));
+                        on = !on;
+                    }
                 });
             }
 

@@ -94,7 +94,14 @@ Si choca con algo de tu barra, puedes moverlo a mano en `%APPDATA%\MusicRG\setti
 
 ### Aviso de Bloq Mayús
 
-Al pulsar Bloq Mayús aparece durante un segundo y medio, encima de la barra de tareas, un aviso con un candado: **"Bloq Mayús activado"** (candado cerrado y pastilla del color de acento) o **"Bloq Mayús desactivado"** (candado abierto y pastilla gris). No roba el foco y los clics lo atraviesan.
+Al pulsar Bloq Mayús aparece, encima de la barra de tareas, un aviso con un candado animado durante unos dos segundos:
+
+- La tarjeta entra creciendo con un pequeño rebote y sale encogiéndose y desvaneciéndose.
+- **"Caps Lock on"**: el grillete abierto gira, baja y encaja con un "clic". El candado y la pastilla de abajo pasan al color de acento.
+- **"Caps Lock off"**: el grillete sube, gira hacia fuera y el candado se balancea un poco. La pastilla se encoge y se vuelve gris.
+- El candado se dibuja con Direct2D, no es un glifo de fuente, y por eso puede animarse. Solo se redibuja mientras algo se mueve.
+
+No roba el foco y los clics lo atraviesan.
 
 Funciona aunque MusicRG esté en la bandeja, mientras la app esté abierta.
 
@@ -298,6 +305,12 @@ En la versión de desarrollo, la variable `MUSICRG_DEMO=1` finge una canción so
 
 ```powershell
 $env:MUSICRG_DEMO = "1"; .\src-tauri\target\debug\musicrg.exe
+```
+
+Para el aviso de Bloq Mayús, `MUSICRG_OSD_DEMO=1` lo alterna solo cada pocos segundos sin tocar la tecla, y en este modo puede convivir con la MusicRG instalada. `MUSICRG_OSD_SLOW=6` reproduce la animación 6 veces más lenta para verla con calma. Las dos variables solo existen en la versión de desarrollo.
+
+```powershell
+$env:MUSICRG_OSD_DEMO = "1"; $env:MUSICRG_OSD_SLOW = "6"; .\src-tauri\target\debug\musicrg.exe
 ```
 
 Las pruebas unitarias se lanzan con `cargo test` en `src-tauri`. Hay otras dos marcadas `#[ignore]` (captura de audio real y descarga de una carátula) que se ejecutan con `cargo test -- --ignored`.
