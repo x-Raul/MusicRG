@@ -53,7 +53,7 @@ Para desinstalarla: *Configuración → Aplicaciones → MusicRG → Desinstalar
 | Abrir la app | Carga Apple Music. Inicias sesión con tu Apple ID como en la web, y la sesión se queda guardada. |
 | Cerrar la ventana (✕) | La ventana se esconde en la bandeja del sistema y **la música sigue sonando**. |
 | Clic izquierdo en el icono de la bandeja | Vuelve a mostrar la ventana y la pone delante. |
-| Clic derecho en el icono de la bandeja | Abre un menú con **Play / Pause**, **Next**, **Previous**, las casillas **Taskbar widget** y **Caps Lock toast**, **Check for updates**, **Show MusicRG** y **Quit**. |
+| Clic derecho en el icono de la bandeja | Abre un menú con **Play / Pause**, **Next**, **Previous**, las casillas **Taskbar widget**, **Show other apps in widget** y **Caps Lock toast**, **Check for updates**, **Show MusicRG** y **Quit**. |
 | Clic en el widget de la barra de tareas | Muestra la ventana de MusicRG. |
 | Volver a abrir MusicRG con la app ya en marcha | No arranca otra copia: muestra la que ya estaba abierta. |
 | Teclas multimedia / control de medios de Windows | Funcionan, porque la web de Apple Music usa la Media Session API. |
@@ -76,6 +76,7 @@ Mientras suena música aparece encima de la barra de tareas, a la izquierda:
 
 - **Aparece** al darle a play y **desaparece** con un fundido cuando pausas o se acaba la música. Espera menos de un segundo antes de irse para no parpadear al cambiar de canción.
 - **Las barras siguen el audio real** de MusicRG. Son 14 bandas de frecuencia, de graves a la izquierda a agudos a la derecha. Solo se oye a MusicRG: si suena otra cosa en el PC, las barras no se mueven por eso.
+- **También muestra lo que suena en otras apps**: un vídeo de YouTube en el navegador, Spotify, VLC… cualquier app que aparezca en los controles multimedia de Windows (el panel del volumen). Si MusicRG está sonando tiene prioridad; si está parada, el widget enseña la otra app con su título, artista (o canal) y carátula. En ese caso las barras siguen todo el audio del PC menos MusicRG. Al hacer clic no se abre MusicRG, porque el widget no es suyo en ese momento. Se puede desactivar con **Show other apps in widget**.
 - Usa los colores de Windows: el color de acento para las barras y el texto claro u oscuro según el tema de la barra de tareas.
 - Se adapta al escalado de pantalla (100 %, 125 %, 150 %…).
 - **Dónde se coloca:** con los iconos centrados va en el hueco libre de la izquierda (si el botón de Widgets/el tiempo está activado, deja su sitio). Con los iconos a la izquierda va junto al área de notificación.
@@ -88,6 +89,7 @@ Si choca con algo de tu barra, puedes moverlo a mano en `%APPDATA%\MusicRG\setti
 {
   "widget": true,
   "caps_lock_toast": true,
+  "other_apps": true,
   "widget_offset": 200
 }
 ```
@@ -107,11 +109,12 @@ Funciona aunque MusicRG esté en la bandeja, mientras la app esté abierta.
 
 ### Activar y desactivar
 
-Clic derecho en el icono de la bandeja → **Widget en la barra de tareas** / **Aviso de Bloq Mayús**. Se guarda en `settings.json` y se recuerda al volver a abrir.
+Clic derecho en el icono de la bandeja → **Taskbar widget** / **Show other apps in widget** / **Caps Lock toast**. Se guarda en `settings.json` y se recuerda al volver a abrir.
 
 ### Privacidad
 
-- La captura de audio solo escucha a los procesos de WebView2 de MusicRG, nunca el micrófono ni otras apps (en Windows 11). Se hace en memoria para calcular las barras y no se guarda nada.
+- Mientras el widget muestra MusicRG, la captura de audio solo escucha a sus procesos de WebView2 (en Windows 11). Mientras muestra otra app, escucha la salida del PC menos MusicRG. Nunca el micrófono. Se hace en memoria para calcular las barras y no se guarda nada.
+- Lo que suena en otras apps (título, artista, carátula) lo lee de los controles multimedia de Windows, lo mismo que ve el panel del volumen. No sale de tu PC. Con **Show other apps in widget** desactivado no se muestra.
 - Para el aviso de Bloq Mayús, Windows le pasa a MusicRG las pulsaciones de teclado (Raw Input). El código solo mira si la tecla es Bloq Mayús y descarta el resto sin guardarlas.
 - La carátula se descarga solo de servidores de Apple (`*.mzstatic.com`, `*.apple.com`); cualquier otra URL se ignora.
 
@@ -245,7 +248,8 @@ MusicRG/
    └─ src/
       ├─ main.rs             # Ventana, bandeja, menú, comando now_playing
       ├─ overlay.rs          # Widget de la barra de tareas y aviso de Bloq Mayús
-      ├─ audio.rs            # Captura de audio de WebView2 + FFT → niveles
+      ├─ audio.rs            # Captura de audio (MusicRG u otras apps) + FFT → niveles
+      ├─ media.rs            # Lo que suena en otras apps (controles multimedia de Windows)
       ├─ art.rs              # Descarga y decodificación de la carátula
       ├─ settings.rs         # %APPDATA%\MusicRG\settings.json
       └─ updater.rs          # Comprobar e instalar actualizaciones
@@ -262,7 +266,7 @@ No hay frontend propio. La interfaz es la web de Apple Music y el proyecto solo 
 | `tauri-plugin-updater` | Actualizaciones firmadas desde GitHub Releases. |
 | `serde_json` | Escapar el CSS para meterlo en el JS y leer/guardar `settings.json`. |
 | `webview2-com` | `ICoreWebView2_19` para el nivel de memoria y `BrowserProcessId` para la captura de audio. |
-| `windows` / `windows-core` | Win32: color de la barra de título (DWM), ventanas del widget, Direct2D, DirectWrite, WIC, URLMon, WASAPI, Raw Input, registro. |
+| `windows` / `windows-core` | Win32: ventanas del widget, Direct2D, DirectWrite, WIC, URLMon, WASAPI, Raw Input, registro. WinRT: controles multimedia de Windows (`Media.Control`). |
 | `windows-numerics` | Tipos de vector/matriz que usa Direct2D. |
 
 Aparte del actualizador (que trae su propio cliente HTTP), no hay crates de HTTP, imagen, audio ni FFT: todo eso lo hace Windows o unas pocas líneas propias.

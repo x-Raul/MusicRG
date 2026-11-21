@@ -12,6 +12,8 @@ pub struct Settings {
     pub widget: bool,
     /// Aviso al pulsar Bloq Mayús.
     pub caps: bool,
+    /// El widget muestra también lo que suena en otras apps (navegador...).
+    pub others: bool,
 }
 
 static OFFSET: OnceLock<Option<f32>> = OnceLock::new();
@@ -38,6 +40,7 @@ pub fn load(dir: &std::path::Path) -> Settings {
     Settings {
         widget: v["widget"].as_bool().unwrap_or(true),
         caps: v["caps_lock_toast"].as_bool().unwrap_or(true),
+        others: v["other_apps"].as_bool().unwrap_or(true),
     }
 }
 
@@ -48,6 +51,7 @@ pub fn save(dir: &std::path::Path, s: Settings) {
     }
     v["widget"] = json!(s.widget);
     v["caps_lock_toast"] = json!(s.caps);
+    v["other_apps"] = json!(s.others);
     let p = path(dir);
     if let Some(parent) = p.parent() {
         let _ = std::fs::create_dir_all(parent);

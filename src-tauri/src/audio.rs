@@ -5,6 +5,9 @@
 //! procesos de WebView2 de MusicRG, no el resto del PC. En sistemas más
 //! viejos cae al loopback de la salida por defecto (todo lo que suena).
 //!
+//! Si lo que suena es otra app (el navegador, Spotify...), se captura al
+//! revés: todo lo que suena en el PC *menos* MusicRG.
+//!
 //! El hilo solo existe mientras el widget está en pantalla. Trabaja ~33 veces
 //! por segundo con una FFT de 1024 puntos: unos microsegundos por pasada.
 
@@ -50,12 +53,21 @@ impl Levels {
     }
 }
 
+/// De quién son las barras.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    /// El audio de MusicRG (su árbol de procesos de WebView2).
+    MusicRG,
+    /// Todo lo demás que suena en el PC (otra app reproduciendo).
+    Others,
+}
+
 /// Cada arranque tiene su propia bandera: un hilo que está terminando nunca
 /// puede apagar al siguiente.
 #[derive(Default)]
 pub struct Capture {
     levels: Arc<Levels>,
-    current: Mutex<Option<(Arc<AtomicBool>, JoinHandle<()>)>>,
+    current: Mutex<Option<(Arc<AtomicBool>, JoinHandle<()>, Source)>>,
 }
 
 impl Capture {
@@ -63,31 +75,31 @@ impl Capture {
         &self.levels
     }
 
-    pub fn start(&self) {
+    pub fn start(&self, source: Source) {
         let mut cur = self.current.lock().unwrap();
-        if let Some((run, h)) = cur.as_ref() {
-            if run.load(Ordering::SeqCst) && !h.is_finished() {
-                return; // ya está capturando
+        if let Some((run, h, src)) = cur.as_ref() {
+            if *src == source && run.load(Ordering::SeqCst) && !h.is_finished() {
+                return; // ya está capturando esa fuente
             }
         }
-        if let Some((run, h)) = cur.take() {
+        if let Some((run, h, _)) = cur.take() {
             run.store(false, Ordering::SeqCst);
             let _ = h.join(); // sale en <=30 ms
         }
         let run = Arc::new(AtomicBool::new(true));
         let (levels, flag) = (self.levels.clone(), run.clone());
         if let Ok(h) = std::thread::Builder::new().name("rg-audio".into()).spawn(move || {
-            if let Err(e) = unsafe { capture(&levels, &flag) } {
+            if let Err(e) = unsafe { capture(&levels, &flag, source) } {
                 log(&format!("audio: {e}"));
             }
             levels.clear();
         }) {
-            *cur = Some((run, h));
+            *cur = Some((run, h, source));
         }
     }
 
     pub fn stop(&self) {
-        if let Some((run, _)) = self.current.lock().unwrap().as_ref() {
+        if let Some((run, _, _)) = self.current.lock().unwrap().as_ref() {
             run.store(false, Ordering::SeqCst);
         }
     }
@@ -106,13 +118,13 @@ struct Format {
     rate: f32,
 }
 
-unsafe fn capture(levels: &Levels, run: &AtomicBool) -> windows::core::Result<()> {
+unsafe fn capture(levels: &Levels, run: &AtomicBool, source: Source) -> windows::core::Result<()> {
     CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
     let out = (|| {
         let event = CreateEventW(None, false, false, None)?;
-        let (client, fmt) = match process_loopback(event) {
+        let (client, fmt) = match process_loopback(event, source) {
             Ok(v) => {
-                log("audio: process loopback");
+                log(&format!("audio: process loopback ({source:?})"));
                 v
             }
             Err(e) => {
@@ -195,13 +207,17 @@ fn target_pid() -> u32 {
     }
 }
 
-unsafe fn process_loopback(event: HANDLE) -> windows::core::Result<(IAudioClient, Format)> {
+unsafe fn process_loopback(event: HANDLE, source: Source) -> windows::core::Result<(IAudioClient, Format)> {
+    let mode = match source {
+        Source::MusicRG => PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+        Source::Others => PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+    };
     let params = AUDIOCLIENT_ACTIVATION_PARAMS {
         ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
         Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
             ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
                 TargetProcessId: target_pid(),
-                ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+                ProcessLoopbackMode: mode,
             },
         },
     };
@@ -380,11 +396,11 @@ mod tests {
     #[ignore]
     fn capture_starts_and_stops() {
         let c = super::Capture::default();
-        c.start();
+        c.start(super::Source::MusicRG);
         std::thread::sleep(std::time::Duration::from_millis(1500));
         c.stop();
         std::thread::sleep(std::time::Duration::from_millis(300));
-        c.start();
+        c.start(super::Source::MusicRG);
         std::thread::sleep(std::time::Duration::from_millis(500));
         c.stop();
         std::thread::sleep(std::time::Duration::from_millis(300));

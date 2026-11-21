@@ -2,6 +2,7 @@
 
 mod art;
 mod audio;
+mod media;
 mod overlay;
 mod settings;
 mod updater;
@@ -78,9 +79,11 @@ fn main() {
             let prefs = config_dir
                 .as_deref()
                 .map(settings::load)
-                .unwrap_or(settings::Settings { widget: true, caps: true });
+                .unwrap_or(settings::Settings { widget: true, caps: true, others: true });
             let handle = app.handle().clone();
-            app.manage(Overlay::spawn(prefs.widget, prefs.caps, move || show(&handle)));
+            app.manage(Overlay::spawn(prefs.widget, prefs.caps, prefs.others, move || show(&handle)));
+            // Lo que suena en otras apps (navegador, Spotify...) para el widget.
+            media::spawn(overlay::external);
             // Solo en desarrollo: MUSICRG_DEMO=1 finge una canción sonando para
             // probar el widget sin tocar el reproductor.
             #[cfg(debug_assertions)]
@@ -139,8 +142,11 @@ fn main() {
             let caps_item = CheckMenuItem::with_id(
                 app, "caps", "Caps Lock toast", true, prefs.caps, None::<&str>,
             )?;
+            let others_item = CheckMenuItem::with_id(
+                app, "others", "Show other apps in widget", true, prefs.others, None::<&str>,
+            )?;
             let update_item = updater::menu_item(app.handle())?;
-            let (wi, ci) = (widget_item.clone(), caps_item.clone());
+            let (wi, ci, oi) = (widget_item.clone(), caps_item.clone(), others_item.clone());
             let menu = Menu::with_items(
                 app,
                 &[
@@ -149,6 +155,7 @@ fn main() {
                     &MenuItem::with_id(app, "prev", "Previous", true, None::<&str>)?,
                     &PredefinedMenuItem::separator(app)?,
                     &widget_item,
+                    &others_item,
                     &caps_item,
                     &PredefinedMenuItem::separator(app)?,
                     &update_item,
@@ -164,14 +171,16 @@ fn main() {
                     "show" => show(app),
                     "quit" => app.exit(0),
                     "update" => updater::on_click(app),
-                    "widget" | "caps" => {
+                    "widget" | "caps" | "others" => {
                         let prefs = settings::Settings {
                             widget: wi.is_checked().unwrap_or(true),
                             caps: ci.is_checked().unwrap_or(true),
+                            others: oi.is_checked().unwrap_or(true),
                         };
                         let overlay = app.state::<Overlay>();
                         overlay.set_widget(prefs.widget);
                         overlay.set_caps(prefs.caps);
+                        overlay.set_others(prefs.others);
                         if let Some(dir) = &config_dir {
                             settings::save(dir, prefs);
                         }

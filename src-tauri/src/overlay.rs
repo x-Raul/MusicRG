@@ -1,6 +1,7 @@
 //! Ventanas nativas fuera de la app:
 //! - Widget "sonando ahora" encima de la barra de tareas (carátula, título,
-//!   artista y barras que siguen el audio real de MusicRG).
+//!   artista y barras que siguen el audio real). Muestra MusicRG y, si
+//!   MusicRG no está sonando, lo que suene en otra app (ver media.rs).
 //! - Aviso de Bloq Mayús activado / desactivado.
 //!
 //! Todo vive en un hilo propio con su bucle de mensajes Win32 y Direct2D por
@@ -33,7 +34,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::art;
-use crate::audio::{Capture, Levels, BANDS};
+use crate::audio::{Capture, Levels, Source, BANDS};
+use crate::media;
 
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct NowPlaying {
@@ -45,6 +47,8 @@ pub struct NowPlaying {
 
 enum Cmd {
     Now(NowPlaying),
+    External(NowPlaying),
+    Others(bool),
     Widget(bool),
     Caps(bool),
     Art(String, Vec<u8>, u32),
@@ -71,11 +75,11 @@ const HIDE_DELAY: Duration = Duration::from_millis(900);
 pub struct Overlay;
 
 impl Overlay {
-    pub fn spawn(widget: bool, caps: bool, on_click: impl Fn() + Send + 'static) -> Self {
+    pub fn spawn(widget: bool, caps: bool, others: bool, on_click: impl Fn() + Send + 'static) -> Self {
         let _ = SHARED.set(Shared { widget: AtomicIsize::new(0), inbox: Mutex::new(Vec::new()) });
         let _ = std::thread::Builder::new()
             .name("rg-overlay".into())
-            .spawn(move || unsafe { thread_main(widget, caps, Box::new(on_click)) });
+            .spawn(move || unsafe { thread_main(widget, caps, others, Box::new(on_click)) });
         Overlay
     }
     pub fn now_playing(&self, np: NowPlaying) {
@@ -87,11 +91,20 @@ impl Overlay {
     pub fn set_caps(&self, on: bool) {
         post(Cmd::Caps(on));
     }
+    /// Mostrar también lo que suena en otras apps cuando MusicRG está parada.
+    pub fn set_others(&self, on: bool) {
+        post(Cmd::Others(on));
+    }
     /// Solo en desarrollo: muestra el aviso de Bloq Mayús sin tocar la tecla.
     #[cfg(debug_assertions)]
     pub fn demo_osd(&self, on: bool) {
         post(Cmd::DemoOsd(on));
     }
+}
+
+/// Lo que suena fuera de MusicRG (lo llama el hilo de media.rs).
+pub fn external(np: NowPlaying) {
+    post(Cmd::External(np));
 }
 
 fn post(cmd: Cmd) {
@@ -110,7 +123,7 @@ thread_local! {
     static ON_CLICK: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
 }
 
-unsafe fn thread_main(widget_on: bool, caps_on: bool, on_click: Box<dyn Fn() + Send>) {
+unsafe fn thread_main(widget_on: bool, caps_on: bool, others_on: bool, on_click: Box<dyn Fn() + Send>) {
     let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     let Ok(hinst) = GetModuleHandleW(None) else { return };
     let class = w!("MusicRGOverlay");
@@ -141,6 +154,10 @@ unsafe fn thread_main(widget_on: bool, caps_on: bool, on_click: Box<dyn Fn() + S
         theme: Theme::read(),
         widget_on,
         caps_on: false,
+        others_on,
+        own: NowPlaying::default(),
+        ext: NowPlaying::default(),
+        source: Source::MusicRG,
     };
     st.set_caps(caps_on);
     STATE.with(|s| *s.borrow_mut() = Some(st));
@@ -161,6 +178,11 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
     match m {
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         WM_LBUTTONUP => {
+            // Con otra app sonando, el widget no es de MusicRG: no la abre.
+            let own = STATE.with(|s| s.try_borrow().ok().and_then(|g| g.as_ref().map(|st| st.source == Source::MusicRG)));
+            if own == Some(false) {
+                return LRESULT(0);
+            }
             ON_CLICK.with(|c| {
                 if let Some(f) = c.borrow().as_ref() {
                     f()
@@ -186,6 +208,13 @@ struct State {
     theme: Theme,
     widget_on: bool,
     caps_on: bool,
+    others_on: bool,
+    /// Lo que cuenta la página de MusicRG.
+    own: NowPlaying,
+    /// Lo que suena en otras apps (controles multimedia de Windows).
+    ext: NowPlaying,
+    /// De quién es lo que muestra el widget ahora.
+    source: Source,
 }
 
 impl State {
@@ -237,25 +266,52 @@ impl State {
         }
     }
 
+    /// Decide qué enseña el widget: MusicRG si está sonando; si no, la otra
+    /// app que suene (si está permitido); si no suena nada, se esconde.
+    unsafe fn refresh(&mut self) {
+        let ext_ok = self.others_on && self.ext.playing;
+        let (np, source) = if self.own.playing {
+            (self.own.clone(), Source::MusicRG)
+        } else if ext_ok {
+            (self.ext.clone(), Source::Others)
+        } else if self.source == Source::Others {
+            // Se queda la última canción en pantalla mientras se desvanece.
+            (NowPlaying { playing: false, ..self.widget.np.clone() }, Source::Others)
+        } else {
+            (self.own.clone(), Source::MusicRG)
+        };
+        self.source = source;
+        let show = np.playing && self.widget_on;
+        self.widget.set_track(np);
+        if show {
+            self.widget.show(&self.gfx, &self.theme);
+            self.capture.start(source);
+        } else {
+            self.widget.hide_later();
+        }
+    }
+
     unsafe fn drain(&mut self) {
         let cmds = std::mem::take(&mut *SHARED.get().unwrap().inbox.lock().unwrap());
         for cmd in cmds {
             match cmd {
                 Cmd::Now(np) => {
-                    let show = np.playing && self.widget_on;
-                    self.widget.set_track(np);
-                    if show {
-                        self.widget.show(&self.gfx, &self.theme);
-                        self.capture.start();
-                    } else {
-                        self.widget.hide_later();
-                    }
+                    self.own = np;
+                    self.refresh();
+                }
+                Cmd::External(np) => {
+                    self.ext = np;
+                    self.refresh();
+                }
+                Cmd::Others(on) => {
+                    self.others_on = on;
+                    self.refresh();
                 }
                 Cmd::Widget(on) => {
                     self.widget_on = on;
                     if on && self.widget.np.playing {
                         self.widget.show(&self.gfx, &self.theme);
-                        self.capture.start();
+                        self.capture.start(self.source);
                     } else if !on {
                         // Se desvanece; el audio se para al terminar (tick).
                         self.widget.hide_now();
@@ -655,7 +711,11 @@ impl Widget {
         let url = self.art_url.clone();
         let px = (ART * self.scale).round() as u32;
         let _ = std::thread::Builder::new().name("rg-art".into()).spawn(move || {
-            let pixels = art::fetch(&url, px);
+            let pixels = if url.starts_with(media::ART_PREFIX) {
+                media::thumbnail(&url).and_then(|bytes| art::decode_bytes(&bytes, px))
+            } else {
+                art::fetch(&url, px)
+            };
             #[cfg(debug_assertions)]
             eprintln!("[musicrg] art {url} -> {}", pixels.is_some());
             if let Some(pixels) = pixels {
