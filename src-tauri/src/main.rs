@@ -4,6 +4,7 @@ mod art;
 mod audio;
 mod overlay;
 mod settings;
+mod updater;
 
 use overlay::{NowPlaying, Overlay};
 use tauri::{
@@ -64,6 +65,7 @@ fn window_ctl(window: WebviewWindow, action: String) {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![now_playing, window_ctl])
         .setup(|app| {
             let config_dir = app.path().config_dir().ok();
@@ -117,6 +119,7 @@ fn main() {
             let caps_item = CheckMenuItem::with_id(
                 app, "caps", "Caps Lock toast", true, prefs.caps, None::<&str>,
             )?;
+            let update_item = updater::menu_item(app.handle())?;
             let (wi, ci) = (widget_item.clone(), caps_item.clone());
             let menu = Menu::with_items(
                 app,
@@ -128,6 +131,7 @@ fn main() {
                     &widget_item,
                     &caps_item,
                     &PredefinedMenuItem::separator(app)?,
+                    &update_item,
                     &MenuItem::with_id(app, "show", "Show MusicRG", true, None::<&str>)?,
                     &MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?,
                 ],
@@ -139,6 +143,7 @@ fn main() {
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "show" => show(app),
                     "quit" => app.exit(0),
+                    "update" => updater::on_click(app),
                     "widget" | "caps" => {
                         let prefs = settings::Settings {
                             widget: wi.is_checked().unwrap_or(true),
@@ -171,6 +176,7 @@ fn main() {
                 tray = tray.icon(icon.clone());
             }
             tray.build(app)?;
+            updater::start(app.handle(), update_item);
             Ok(())
         })
         .on_window_event(|window, event| {

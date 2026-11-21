@@ -18,6 +18,7 @@ Además trae un **widget sobre la barra de tareas** con la canción que suena y 
 - [Instalar](#instalar)
 - [Uso](#uso)
 - [Widget de la barra de tareas y aviso de Bloq Mayús](#widget-de-la-barra-de-tareas-y-aviso-de-bloq-mayús)
+- [Actualizaciones](#actualizaciones)
 - [Personalizar el diseño](#personalizar-el-diseño)
 - [Qué hace para gastar poco](#qué-hace-para-gastar-poco)
 - [Cómo funciona](#cómo-funciona)
@@ -52,11 +53,12 @@ Para desinstalarla: *Configuración → Aplicaciones → MusicRG → Desinstalar
 | Abrir la app | Carga Apple Music. Inicias sesión con tu Apple ID como en la web, y la sesión se queda guardada. |
 | Cerrar la ventana (✕) | La ventana se esconde en la bandeja del sistema y **la música sigue sonando**. |
 | Clic izquierdo en el icono de la bandeja | Vuelve a mostrar la ventana y la pone delante. |
-| Clic derecho en el icono de la bandeja | Abre un menú con **Reproducir / Pausar**, **Siguiente**, **Anterior**, las casillas **Widget en la barra de tareas** y **Aviso de Bloq Mayús**, **Mostrar MusicRG** y **Salir**. |
+| Clic derecho en el icono de la bandeja | Abre un menú con **Play / Pause**, **Next**, **Previous**, las casillas **Taskbar widget** y **Caps Lock toast**, **Check for updates**, **Show MusicRG** y **Quit**. |
 | Clic en el widget de la barra de tareas | Muestra la ventana de MusicRG. |
 | Volver a abrir MusicRG con la app ya en marcha | No arranca otra copia: muestra la que ya estaba abierta. |
 | Teclas multimedia / control de medios de Windows | Funcionan, porque la web de Apple Music usa la Media Session API. |
-| Salir del todo | Clic derecho en la bandeja → **Salir**. |
+| Salir del todo | Clic derecho en la bandeja → **Quit**. |
+| Actualizar | Cuando hay versión nueva, el menú de la bandeja muestra **Install update vX.Y.Z**. Ver [Actualizaciones](#actualizaciones). |
 
 La ventana abre a 1180×760 y se puede encoger hasta 420×320, que sirve como minirreproductor.
 
@@ -105,6 +107,18 @@ Clic derecho en el icono de la bandeja → **Widget en la barra de tareas** / **
 - La captura de audio solo escucha a los procesos de WebView2 de MusicRG, nunca el micrófono ni otras apps (en Windows 11). Se hace en memoria para calcular las barras y no se guarda nada.
 - Para el aviso de Bloq Mayús, Windows le pasa a MusicRG las pulsaciones de teclado (Raw Input). El código solo mira si la tecla es Bloq Mayús y descarta el resto sin guardarlas.
 - La carátula se descarga solo de servidores de Apple (`*.mzstatic.com`, `*.apple.com`); cualquier otra URL se ignora.
+
+## Actualizaciones
+
+MusicRG se actualiza desde las GitHub Releases del repositorio:
+
+- 20 segundos después de arrancar, y luego cada 6 horas, consulta `latest.json` del último release. No manda ningún dato tuyo: es una descarga normal de un archivo público.
+- Si hay una versión más nueva, la entrada del menú de la bandeja pasa a **Install update vX.Y.Z** y el tooltip del icono lo avisa.
+- **No instala nada sin que hagas clic.** Al instalar se cierra la app (se corta la música), se ejecuta el instalador sin preguntas y se vuelve a abrir.
+- El instalador descargado tiene que estar firmado con la clave del proyecto. La clave pública está en `tauri.conf.json`. Si la firma no coincide, no se instala.
+- Con **Check for updates** puedes comprobarlo a mano en cualquier momento.
+
+La primera versión con actualizador hay que instalarla a mano. A partir de ahí, las siguientes llegan solas.
 
 ## Personalizar el diseño
 
@@ -211,7 +225,8 @@ MusicRG/
    ├─ Cargo.toml             # Dependencias Rust y perfil release optimizado
    ├─ Cargo.lock
    ├─ build.rs               # tauri-build
-   ├─ tauri.conf.json        # Nombre, versión, identificador, bundle NSIS, WebView2
+   ├─ tauri.conf.json        # Nombre, versión, identificador, bundle NSIS, WebView2, updater
+   ├─ tauri.updater.json     # Lo añade el CI para generar el .sig del actualizador
    ├─ icons/
    │  ├─ icon.ico            # Icono de la app y de la bandeja
    │  └─ icon.svg            # Fuente del icono
@@ -225,7 +240,8 @@ MusicRG/
       ├─ overlay.rs          # Widget de la barra de tareas y aviso de Bloq Mayús
       ├─ audio.rs            # Captura de audio de WebView2 + FFT → niveles
       ├─ art.rs              # Descarga y decodificación de la carátula
-      └─ settings.rs         # %APPDATA%\MusicRG\settings.json
+      ├─ settings.rs         # %APPDATA%\MusicRG\settings.json
+      └─ updater.rs          # Comprobar e instalar actualizaciones
 ```
 
 No hay frontend propio. La interfaz es la web de Apple Music y el proyecto solo añade la parte nativa y lo que se inyecta en la página.
@@ -236,12 +252,13 @@ No hay frontend propio. La interfaz es la web de Apple Music y el proyecto solo 
 | --- | --- |
 | `tauri` 2 (feature `tray-icon`) | Ventana, WebView2, bandeja, menús. |
 | `tauri-plugin-single-instance` | Que solo haya una instancia. |
+| `tauri-plugin-updater` | Actualizaciones firmadas desde GitHub Releases. |
 | `serde_json` | Escapar el CSS para meterlo en el JS y leer/guardar `settings.json`. |
 | `webview2-com` | `ICoreWebView2_19` para el nivel de memoria y `BrowserProcessId` para la captura de audio. |
 | `windows` / `windows-core` | Win32: color de la barra de título (DWM), ventanas del widget, Direct2D, DirectWrite, WIC, URLMon, WASAPI, Raw Input, registro. |
 | `windows-numerics` | Tipos de vector/matriz que usa Direct2D. |
 
-No hay crates de HTTP, imagen, audio ni FFT: todo eso lo hace Windows o unas pocas líneas propias.
+Aparte del actualizador (que trae su propio cliente HTTP), no hay crates de HTTP, imagen, audio ni FFT: todo eso lo hace Windows o unas pocas líneas propias.
 
 ## Compilar desde el código
 
@@ -299,11 +316,21 @@ La versión está en dos sitios y conviene que coincidan:
 [`.github/workflows/build.yml`](.github/workflows/build.yml) se ejecuta en **cada push** y también a mano (*workflow_dispatch*), en `windows-latest`:
 
 1. Instala Node 22 y Rust estable, y cachea `src-tauri/target`.
-2. Ejecuta `npm install` y `npm run build`.
+2. Ejecuta `npm install` y `npm run build`. Si existe el secret `TAURI_SIGNING_PRIVATE_KEY`, firma también el instalador (`.sig`).
 3. Sube `musicrg.exe` y el instalador como artefacto **`MusicRG-windows`**.
-4. Si el push es una **etiqueta `v*`** (por ejemplo `v0.2.0`), crea una **GitHub Release** con el instalador adjunto.
+4. Si el push es una **etiqueta `v*`** (por ejemplo `v0.2.0`), genera `latest.json` y crea una **GitHub Release** con el instalador, su `.sig` y `latest.json`. Falla si la etiqueta no coincide con la versión de `tauri.conf.json` o si falta la clave de firma.
 
-Para publicar una versión:
+### Clave de firma del actualizador
+
+El par de claves se crea una sola vez con `tauri signer generate`. La privada vive **fuera del repo** (`%USERPROFILE%\.tauri\musicrg.key`) y en GitHub como secret:
+
+- *Settings → Secrets and variables → Actions → New repository secret*
+- `TAURI_SIGNING_PRIVATE_KEY` = el contenido de `musicrg.key`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` = no hace falta crearlo (la clave no tiene contraseña)
+
+Si pierdes la clave privada, las versiones ya instaladas no podrán actualizarse a builds firmados con una clave nueva: habría que reinstalar a mano.
+
+Para publicar una versión, sube antes la versión en `tauri.conf.json` y `Cargo.toml` (ver [Cambiar la versión](#cambiar-la-versión)), haz commit y luego:
 
 ```powershell
 git tag v0.2.0
