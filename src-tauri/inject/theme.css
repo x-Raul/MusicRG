@@ -1,0 +1,69 @@
+/*
+ * Tema de MusicRG. Se inyecta sobre music.apple.com.
+ * Para personalizarlo sin recompilar, crea %APPDATA%\MusicRG\theme.css:
+ * lo que pongas ahí se aplica después de este archivo y tiene prioridad.
+ */
+
+:root {
+  /* Cambia solo estas dos líneas para otro look. */
+  --rg-accent: #ff4d6d;
+  --rg-bg: #0b0b0f;
+
+  --rg-surface: #14141a;
+  --rg-line: rgba(255, 255, 255, 0.07);
+
+  /* Variables propias de Apple Music web. */
+  --keyColor: var(--rg-accent) !important;
+  --keyColorBG: var(--rg-accent) !important;
+  --pageBG: var(--rg-bg) !important;
+  --navSidebarBG: var(--rg-bg) !important;
+  --playerBackground: var(--rg-surface) !important;
+
+  color-scheme: dark;
+  accent-color: var(--rg-accent);
+}
+
+html,
+body {
+  background: var(--rg-bg) !important;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--rg-accent) 45%, transparent);
+  color: #fff;
+}
+
+/* Barras de scroll finas, sin carril. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+
+/* Fuera los avisos de "abrir en la app" / "consigue la app": ya estás en una. */
+[class*="native-cta"],
+[data-testid*="native-cta"],
+[class*="upsell-banner"],
+[data-testid*="open-in-app"] {
+  display: none !important;
+}
+
+:focus-visible {
+  outline: 2px solid var(--rg-accent) !important;
+  outline-offset: 2px;
+}
+
+/* --- Ahorro de recursos --- */
+
+/* El desenfoque de fondo es lo más caro de pintar en la GPU. */
+* {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+/* Con la ventana sin foco u oculta: nada de animaciones ni vídeo decorativo. */
+html.rg-idle *,
+html.rg-idle *::before,
+html.rg-idle *::after {
+  animation-play-state: paused !important;
+  transition: none !important;
+}

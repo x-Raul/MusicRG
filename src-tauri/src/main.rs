@@ -1,0 +1,162 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Manager, Theme, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+};
+
+const URL: &str = "https://music.apple.com/";
+const THEME_CSS: &str = include_str!("../inject/theme.css");
+const SHELL_JS: &str = include_str!("../inject/shell.js");
+
+/// Color de fondo del tema (--rg-bg). La barra de título se pinta igual.
+const BG: (u8, u8, u8) = (0x0b, 0x0b, 0x0f);
+
+/// Flags de Chromium. Los tres primeros `ms*` son los que Tauri pone por defecto;
+/// el resto apaga servicios que un reproductor no usa. No se desactivan las
+/// actualizaciones de componentes: el DRM (Widevine) llega por ahí.
+const BROWSER_ARGS: &str = concat!(
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,",
+    "msEdgeTranslate,Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,",
+    "msEdgeShoppingUI,msEdgeCollections",
+    " --autoplay-policy=no-user-gesture-required",
+    " --renderer-process-limit=2",
+    " --disable-domain-reliability",
+    " --no-pings",
+);
+
+fn main() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)))
+        .setup(|app| {
+            let css = match app.path().config_dir() {
+                Ok(dir) => {
+                    let user = std::fs::read_to_string(dir.join("MusicRG").join("theme.css"))
+                        .unwrap_or_default();
+                    format!("{THEME_CSS}\n{user}")
+                }
+                Err(_) => THEME_CSS.to_string(),
+            };
+            let script = SHELL_JS.replace("__RG_CSS__", &serde_json::to_string(&css)?);
+
+            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(URL.parse()?))
+                .title("MusicRG")
+                .inner_size(1180.0, 760.0)
+                .min_inner_size(420.0, 320.0)
+                .center()
+                .theme(Some(Theme::Dark))
+                .background_color(tauri::webview::Color(BG.0, BG.1, BG.2, 255))
+                .additional_browser_args(BROWSER_ARGS)
+                .initialization_script(&script)
+                .build()?;
+            paint_title_bar(&win);
+
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &MenuItem::with_id(app, "toggle", "Reproducir / Pausar", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "next", "Siguiente", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "prev", "Anterior", true, None::<&str>)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &MenuItem::with_id(app, "show", "Mostrar MusicRG", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?,
+                ],
+            )?;
+            let mut tray = TrayIconBuilder::with_id("main")
+                .tooltip("MusicRG")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "show" => show(app),
+                    "quit" => app.exit(0),
+                    cmd => {
+                        if let Some(win) = app.get_webview_window("main") {
+                            let _ = win.eval(format!("window.__rg&&window.__rg.cmd('{cmd}')"));
+                        }
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show(tray.app_handle());
+                    }
+                });
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.build(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Cerrar = esconder en la bandeja; la música sigue. "Salir" está en el menú.
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+                if let Some(win) = window.app_handle().get_webview_window(window.label()) {
+                    set_low_memory(&win, true);
+                }
+            }
+        })
+        .run(tauri::generate_context!())
+        .expect("no se pudo iniciar MusicRG");
+}
+
+fn show(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        set_low_memory(&win, false);
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
+/// Windows 11: barra de título nativa del mismo color que la página, para que
+/// se fundan. En Windows 10 la llamada falla sin más y queda la barra oscura.
+#[cfg(windows)]
+fn paint_title_bar(win: &WebviewWindow) {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR};
+    let Ok(hwnd) = win.hwnd() else { return };
+    let color: u32 = BG.0 as u32 | (BG.1 as u32) << 8 | (BG.2 as u32) << 16; // COLORREF 0x00BBGGRR
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            windows::Win32::Foundation::HWND(hwnd.0 as _),
+            DWMWA_CAPTION_COLOR,
+            &color as *const u32 as *const _,
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
+}
+
+/// Con la ventana en la bandeja, pide a WebView2 que suelte la memoria que
+/// pueda (caches, páginas inactivas). El audio sigue sonando.
+#[cfg(windows)]
+fn set_low_memory(win: &WebviewWindow, low: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+    };
+    use windows_core::Interface;
+    let _ = win.with_webview(move |wv| unsafe {
+        let level = if low {
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+        } else {
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+        };
+        if let Ok(core) = wv.controller().CoreWebView2() {
+            if let Ok(core) = core.cast::<ICoreWebView2_19>() {
+                let _ = core.SetMemoryUsageTargetLevel(level);
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn paint_title_bar(_: &WebviewWindow) {}
+
+#[cfg(not(windows))]
+fn set_low_memory(_: &WebviewWindow, _: bool) {}
