@@ -49,4 +49,67 @@
       if (name === "prev") return m.skipToPreviousItem();
     },
   };
+
+  // "Sonando ahora" para el widget de la barra de tareas (lo dibuja Rust).
+  // Todo por eventos, nada de sondeo:
+  // - play/pausa: eventos del propio <audio>/<video> (capturados en document,
+  //   no dependen de MusicKit, que a veces recrea su reproductor);
+  // - título/artista/carátula: MusicKit si está, si no la Media Session, y se
+  //   vuelve a leer cada vez que la página cambia navigator.mediaSession.metadata.
+  let last = "";
+  let playing = false;
+  const send = (msg) => {
+    const key = JSON.stringify(msg);
+    if (key === last) return;
+    last = key;
+    try {
+      const ipc = window.__TAURI_INTERNALS__;
+      if (ipc) ipc.invoke("now_playing", msg).catch(() => {});
+    } catch (_) {}
+  };
+  const report = () => {
+    const m = kit();
+    const it = m && m.nowPlayingItem;
+    const at = (it && it.attributes) || {};
+    const meta = navigator.mediaSession && navigator.mediaSession.metadata;
+    const title = (it && it.title) || at.name || (meta && meta.title) || "";
+    const artist = (it && it.artistName) || at.artistName || (meta && meta.artist) || "";
+    let art = "";
+    const tpl = (it && it.artwork && it.artwork.url) || (at.artwork && at.artwork.url);
+    if (tpl) art = tpl.replace("{w}", "96").replace("{h}", "96").replace("{f}", "jpg");
+    else if (meta && meta.artwork && meta.artwork.length) art = meta.artwork[meta.artwork.length - 1].src;
+    send({ playing: playing && !!title, title, artist, art });
+  };
+  // Apple Music usa varios elementos de audio (la canción y la siguiente
+  // precargada): suena si CUALQUIERA de ellos suena, no el último que avisó.
+  const media = new Set();
+  const onMedia = (e) => {
+    const el = e.target;
+    if (!(el instanceof HTMLMediaElement)) return;
+    media.add(el);
+    let any = false;
+    for (const x of media) {
+      if (!x.isConnected && x.paused) media.delete(x);
+      // Los vídeos mudos son carátulas animadas, no la música.
+      else if (!x.muted && !x.paused && !x.ended) any = true;
+    }
+    playing = any;
+    report();
+  };
+  for (const ev of ["playing", "pause", "ended", "emptied"]) {
+    document.addEventListener(ev, onMedia, true);
+  }
+  try {
+    const d = Object.getOwnPropertyDescriptor(MediaSession.prototype, "metadata");
+    Object.defineProperty(MediaSession.prototype, "metadata", {
+      configurable: true,
+      enumerable: d.enumerable,
+      get: d.get,
+      set(v) {
+        d.set.call(this, v);
+        setTimeout(report, 0);
+      },
+    });
+  } catch (_) {}
+  addEventListener("pagehide", () => send({ playing: false, title: "", artist: "", art: "" }));
 })();

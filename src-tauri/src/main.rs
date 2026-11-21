@@ -1,7 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod art;
+mod audio;
+mod overlay;
+mod settings;
+
+use overlay::{NowPlaying, Overlay};
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, Theme, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
@@ -26,10 +32,44 @@ const BROWSER_ARGS: &str = concat!(
     " --no-pings",
 );
 
+/// La página avisa de cada cambio de canción o de play/pausa (ver shell.js).
+#[tauri::command]
+fn now_playing(overlay: tauri::State<Overlay>, playing: bool, title: String, artist: String, art: String) {
+    #[cfg(debug_assertions)]
+    {
+        eprintln!("[musicrg] now_playing playing={playing} title={title:?} art={}", !art.is_empty());
+        if std::env::var_os("MUSICRG_DEMO").is_some() {
+            return; // en modo demo manda la canción falsa
+        }
+    }
+    let clip = |s: String| s.chars().take(300).collect::<String>();
+    overlay.now_playing(NowPlaying { playing, title: clip(title), artist: clip(artist), art: clip(art) });
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)))
+        .invoke_handler(tauri::generate_handler![now_playing])
         .setup(|app| {
+            let config_dir = app.path().config_dir().ok();
+            let prefs = config_dir
+                .as_deref()
+                .map(settings::load)
+                .unwrap_or(settings::Settings { widget: true, caps: true });
+            let handle = app.handle().clone();
+            app.manage(Overlay::spawn(prefs.widget, prefs.caps, move || show(&handle)));
+            // Solo en desarrollo: MUSICRG_DEMO=1 finge una canción sonando para
+            // probar el widget sin tocar el reproductor.
+            #[cfg(debug_assertions)]
+            if std::env::var_os("MUSICRG_DEMO").is_some() {
+                app.state::<Overlay>().now_playing(NowPlaying {
+                    playing: true,
+                    title: "Dark Dream (Demo de MusicRG)".into(),
+                    artist: "Artista de prueba".into(),
+                    art: std::env::var("MUSICRG_DEMO_ART").unwrap_or_default(),
+                });
+            }
+
             let css = match app.path().config_dir() {
                 Ok(dir) => {
                     let user = std::fs::read_to_string(dir.join("MusicRG").join("theme.css"))
@@ -51,13 +91,24 @@ fn main() {
                 .initialization_script(&script)
                 .build()?;
             paint_title_bar(&win);
+            remember_browser_pid(&win);
 
+            let widget_item = CheckMenuItem::with_id(
+                app, "widget", "Widget en la barra de tareas", true, prefs.widget, None::<&str>,
+            )?;
+            let caps_item = CheckMenuItem::with_id(
+                app, "caps", "Aviso de Bloq Mayús", true, prefs.caps, None::<&str>,
+            )?;
+            let (wi, ci) = (widget_item.clone(), caps_item.clone());
             let menu = Menu::with_items(
                 app,
                 &[
                     &MenuItem::with_id(app, "toggle", "Reproducir / Pausar", true, None::<&str>)?,
                     &MenuItem::with_id(app, "next", "Siguiente", true, None::<&str>)?,
                     &MenuItem::with_id(app, "prev", "Anterior", true, None::<&str>)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &widget_item,
+                    &caps_item,
                     &PredefinedMenuItem::separator(app)?,
                     &MenuItem::with_id(app, "show", "Mostrar MusicRG", true, None::<&str>)?,
                     &MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?,
@@ -67,9 +118,21 @@ fn main() {
                 .tooltip("MusicRG")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id().as_ref() {
+                .on_menu_event(move |app, event| match event.id().as_ref() {
                     "show" => show(app),
                     "quit" => app.exit(0),
+                    "widget" | "caps" => {
+                        let prefs = settings::Settings {
+                            widget: wi.is_checked().unwrap_or(true),
+                            caps: ci.is_checked().unwrap_or(true),
+                        };
+                        let overlay = app.state::<Overlay>();
+                        overlay.set_widget(prefs.widget);
+                        overlay.set_caps(prefs.caps);
+                        if let Some(dir) = &config_dir {
+                            settings::save(dir, prefs);
+                        }
+                    }
                     cmd => {
                         if let Some(win) = app.get_webview_window("main") {
                             let _ = win.eval(format!("window.__rg&&window.__rg.cmd('{cmd}')"));
@@ -154,6 +217,22 @@ fn set_low_memory(win: &WebviewWindow, low: bool) {
         }
     });
 }
+
+/// El widget captura el audio del árbol de procesos de WebView2.
+#[cfg(windows)]
+fn remember_browser_pid(win: &WebviewWindow) {
+    let _ = win.with_webview(|wv| unsafe {
+        if let Ok(core) = wv.controller().CoreWebView2() {
+            let mut pid = 0u32;
+            if core.BrowserProcessId(&mut pid).is_ok() {
+                audio::BROWSER_PID.store(pid, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn remember_browser_pid(_: &WebviewWindow) {}
 
 #[cfg(not(windows))]
 fn paint_title_bar(_: &WebviewWindow) {}

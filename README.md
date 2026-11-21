@@ -2,9 +2,11 @@
 
 Reproductor de Apple Music para Windows, ligero y con tema propio.
 
-MusicRG abre `music.apple.com` en una ventana nativa usando **WebView2**, el motor Chromium que ya viene con Windows. No lleva un navegador dentro: el ejecutable pesa unos 3 MB, el instalador alrededor de 1 MB, y la app usa el mismo motor que tiene el sistema.
+MusicRG abre `music.apple.com` en una ventana nativa usando **WebView2**, el motor Chromium que ya viene con Windows. No lleva un navegador dentro: el ejecutable pesa unos 4 MB, el instalador alrededor de 1,4 MB, y la app usa el mismo motor que tiene el sistema.
 
 Encima de la web oficial añade lo que le falta para sentirse como una app de escritorio: icono en la bandeja, controles desde ahí, una sola instancia, barra de título del color de la app, un tema oscuro que puedes cambiar y varios ajustes para gastar menos CPU, GPU y RAM.
+
+Además trae un **widget sobre la barra de tareas** con la canción que suena y unas barras que siguen el audio real, y un **aviso de Bloq Mayús** al activarlo o desactivarlo. Los dos son nativos (Win32 + Direct2D), no otro navegador.
 
 > No está afiliado a Apple. Necesitas una suscripción a Apple Music.
 
@@ -15,6 +17,7 @@ Encima de la web oficial añade lo que le falta para sentirse como una app de es
 - [Requisitos](#requisitos)
 - [Instalar](#instalar)
 - [Uso](#uso)
+- [Widget de la barra de tareas y aviso de Bloq Mayús](#widget-de-la-barra-de-tareas-y-aviso-de-bloq-mayús)
 - [Personalizar el diseño](#personalizar-el-diseño)
 - [Qué hace para gastar poco](#qué-hace-para-gastar-poco)
 - [Cómo funciona](#cómo-funciona)
@@ -49,12 +52,59 @@ Para desinstalarla: *Configuración → Aplicaciones → MusicRG → Desinstalar
 | Abrir la app | Carga Apple Music. Inicias sesión con tu Apple ID como en la web, y la sesión se queda guardada. |
 | Cerrar la ventana (✕) | La ventana se esconde en la bandeja del sistema y **la música sigue sonando**. |
 | Clic izquierdo en el icono de la bandeja | Vuelve a mostrar la ventana y la pone delante. |
-| Clic derecho en el icono de la bandeja | Abre un menú con **Reproducir / Pausar**, **Siguiente**, **Anterior**, **Mostrar MusicRG** y **Salir**. |
+| Clic derecho en el icono de la bandeja | Abre un menú con **Reproducir / Pausar**, **Siguiente**, **Anterior**, las casillas **Widget en la barra de tareas** y **Aviso de Bloq Mayús**, **Mostrar MusicRG** y **Salir**. |
+| Clic en el widget de la barra de tareas | Muestra la ventana de MusicRG. |
 | Volver a abrir MusicRG con la app ya en marcha | No arranca otra copia: muestra la que ya estaba abierta. |
 | Teclas multimedia / control de medios de Windows | Funcionan, porque la web de Apple Music usa la Media Session API. |
 | Salir del todo | Clic derecho en la bandeja → **Salir**. |
 
 La ventana abre a 1180×760 y se puede encoger hasta 420×320, que sirve como minirreproductor.
+
+## Widget de la barra de tareas y aviso de Bloq Mayús
+
+### Widget "sonando ahora"
+
+Mientras suena música aparece encima de la barra de tareas, a la izquierda:
+
+```
+┌──────┐  Título de la canción            ▎▍▌▋▊▋▌▍▎▍▌▋▊▋
+│ arte │  Artista                         (barras en vivo)
+└──────┘
+```
+
+- **Aparece** al darle a play y **desaparece** con un fundido cuando pausas o se acaba la música. Espera menos de un segundo antes de irse para no parpadear al cambiar de canción.
+- **Las barras siguen el audio real** de MusicRG. Son 14 bandas de frecuencia, de graves a la izquierda a agudos a la derecha. Solo se oye a MusicRG: si suena otra cosa en el PC, las barras no se mueven por eso.
+- Usa los colores de Windows: el color de acento para las barras y el texto claro u oscuro según el tema de la barra de tareas.
+- Se adapta al escalado de pantalla (100 %, 125 %, 150 %…).
+- **Dónde se coloca:** con los iconos centrados va en el hueco libre de la izquierda (si el botón de Widgets/el tiempo está activado, deja su sitio). Con los iconos a la izquierda va junto al área de notificación.
+- **Se esconde solo** con juegos, vídeos o presentaciones a pantalla completa, con la barra en vertical o con la barra en auto-ocultar mientras está escondida.
+- Al pasar el ratón se ilumina un poco, y con un clic se abre MusicRG.
+
+Si choca con algo de tu barra, puedes moverlo a mano en `%APPDATA%\MusicRG\settings.json` con `"widget_offset"`: es la distancia en píxeles (a escala 100 %) desde el borde izquierdo de la barra. Después reinicia MusicRG.
+
+```json
+{
+  "widget": true,
+  "caps_lock_toast": true,
+  "widget_offset": 200
+}
+```
+
+### Aviso de Bloq Mayús
+
+Al pulsar Bloq Mayús aparece durante un segundo y medio, encima de la barra de tareas, un aviso con un candado: **"Bloq Mayús activado"** (candado cerrado y pastilla del color de acento) o **"Bloq Mayús desactivado"** (candado abierto y pastilla gris). No roba el foco y los clics lo atraviesan.
+
+Funciona aunque MusicRG esté en la bandeja, mientras la app esté abierta.
+
+### Activar y desactivar
+
+Clic derecho en el icono de la bandeja → **Widget en la barra de tareas** / **Aviso de Bloq Mayús**. Se guarda en `settings.json` y se recuerda al volver a abrir.
+
+### Privacidad
+
+- La captura de audio solo escucha a los procesos de WebView2 de MusicRG, nunca el micrófono ni otras apps (en Windows 11). Se hace en memoria para calcular las barras y no se guarda nada.
+- Para el aviso de Bloq Mayús, Windows le pasa a MusicRG las pulsaciones de teclado (Raw Input). El código solo mira si la tecla es Bloq Mayús y descarta el resto sin guardarlas.
+- La carátula se descarga solo de servidores de Apple (`*.mzstatic.com`, `*.apple.com`); cualquier otra URL se ignora.
 
 ## Personalizar el diseño
 
@@ -96,6 +146,15 @@ El tema base está en [`src-tauri/inject/theme.css`](src-tauri/inject/theme.css)
 - **Una sola instancia**, así que nunca hay dos copias cargando la web a la vez.
 - **Binario optimizado por tamaño**: `opt-level = "s"`, LTO, una sola unidad de compilación, `panic = "abort"` y símbolos eliminados.
 
+El widget y el aviso de Bloq Mayús están hechos para no notarse:
+
+- **Ventanas nativas, no otro WebView.** Direct2D por software sobre ventanas *layered*: unos pocos MB y nada de GPU.
+- **Cero trabajo en pausa.** Con la música parada no hay temporizadores ni captura de audio: el hilo del widget duerme hasta que llega un mensaje.
+- **Solo repinta si algo cambia.** Mientras suena se anima a ~30 fps, pero si las barras no se mueven no se toca un píxel.
+- **Audio barato.** Una FFT de 1024 puntos unas 30 veces por segundo, sin librerías externas. Medido: **0,06 % de CPU** con música sonando y el widget animado.
+- **Bloq Mayús por eventos.** Usa Raw Input en vez de un hook global de teclado, así que no añade latencia al teclado de nadie y no sondea el estado de la tecla.
+- **Play/pausa por eventos** de la propia página (`play`/`pause` del elemento de audio y cambios de la Media Session), sin sondeo.
+
 Lo que **no** se desactiva a propósito: las actualizaciones de componentes de Chromium. Por ahí llega Widevine (el DRM), y sin él Apple Music no reproduce nada.
 
 ## Cómo funciona
@@ -110,12 +169,20 @@ Lo que **no** se desactiva a propósito: las actualizaciones de componentes de C
 │   │    └─ script de inicio: shell.js + theme.css (+ tu theme.css)            │
 │   ├─ Icono de bandeja + menú  ──eval──►  window.__rg.cmd('toggle'|'next'…)   │
 │   ├─ Cerrar → ocultar + memoria baja; mostrar → memoria normal               │
-│   └─ Plugin single-instance → segunda ejecución = mostrar la primera         │
+│   ├─ Plugin single-instance → segunda ejecución = mostrar la primera         │
+│   └─ comando now_playing  ◄──invoke──  shell.js (play/pausa, título, arte)  │
+│                                                                              │
+│  Hilo "rg-overlay" (overlay.rs) — bucle de mensajes Win32 propio            │
+│   ├─ Widget: ventana layered propiedad de la barra de tareas + Direct2D     │
+│   ├─ Aviso Bloq Mayús: ventana layered + Raw Input (sin hook global)        │
+│   ├─ Hilo "rg-audio" (audio.rs): process loopback de WebView2 → FFT → barras │
+│   └─ Hilo "rg-art" (art.rs): descarga y decodifica la carátula (URLMon+WIC) │
 │                                                                              │
 │  Dentro de la página (shell.js)                                              │
 │   ├─ Inyecta el CSS como hoja construida (adoptedStyleSheets)                │
 │   ├─ blur/focus/visibilitychange → clase .rg-idle + pausa vídeos mudos       │
-│   └─ window.__rg.cmd() → MusicKit.getInstance().play/pause/skip…            │
+│   ├─ window.__rg.cmd() → MusicKit.getInstance().play/pause/skip…            │
+│   └─ eventos play/pause + Media Session → invoke('now_playing')             │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -127,6 +194,10 @@ Paso a paso:
 4. **Tema.** `shell.js` aplica el CSS con `new CSSStyleSheet()` + `document.adoptedStyleSheets`. Así no lo bloquea la Content Security Policy de Apple y no añade nodos al DOM.
 5. **Bandeja.** Las opciones de reproducción del menú ejecutan `window.__rg.cmd(...)` en la página, que llama a la API oficial de **MusicKit JS** que ya usa la web (`play`, `pause`, `skipToNextItem`, `skipToPreviousItem`).
 6. **Cerrar / mostrar.** Cerrar se intercepta (`prevent_close`), la ventana se oculta y WebView2 pasa a memoria baja. Al mostrarla vuelve a memoria normal y recupera el foco.
+7. **Sonando ahora.** `shell.js` escucha los eventos `playing`/`pause`/`ended` de los elementos de audio de la página (Apple Music usa más de uno, así que suena si *cualquiera* suena) y los cambios de `navigator.mediaSession.metadata`. Cuando algo cambia, llama al comando `now_playing` por la IPC de Tauri. Una *capability* remota ([`capabilities/apple-music.json`](src-tauri/capabilities/apple-music.json)) deja a `https://music.apple.com` llamar **solo** a ese comando.
+8. **Widget.** El hilo `rg-overlay` lo dibuja con Direct2D sobre un mapa de bits en memoria y lo pone en pantalla con `UpdateLayeredWindow` (transparencia por píxel). La ventana es "propiedad" de la barra de tareas (`Shell_TrayWnd`), así que siempre queda encima de ella. Cada segundo, mientras está visible, comprueba la posición de la barra y si hay algo a pantalla completa.
+9. **Barras.** El hilo `rg-audio` captura con *process loopback* (WASAPI) el árbol de procesos del navegador de WebView2, cuyo PID se pide con `ICoreWebView2.BrowserProcessId` porque Windows no lo cuenta dentro del árbol de `musicrg.exe`. En Windows anterior a la build 20348 cae al loopback de la salida por defecto. Cada ~33 ms aplica una ventana Hann y una FFT de 1024 puntos, agrupa en 14 bandas logarítmicas (50 Hz – 14 kHz) y deja los niveles en atómicos que el widget lee al pintar.
+10. **Bloq Mayús.** El widget se registra para Raw Input de teclado en modo *sink*. Al soltar Bloq Mayús espera 30 ms a que Windows actualice el conmutador, lee `GetKeyState(VK_CAPITAL)` y enseña el aviso.
 
 ## Estructura del proyecto
 
@@ -147,8 +218,14 @@ MusicRG/
    ├─ inject/
    │  ├─ theme.css           # Tema que se inyecta en music.apple.com
    │  └─ shell.js            # Script de página: CSS, modo reposo, controles
+   ├─ capabilities/
+   │  └─ apple-music.json    # music.apple.com solo puede llamar a now_playing
    └─ src/
-      └─ main.rs             # Toda la lógica nativa
+      ├─ main.rs             # Ventana, bandeja, menú, comando now_playing
+      ├─ overlay.rs          # Widget de la barra de tareas y aviso de Bloq Mayús
+      ├─ audio.rs            # Captura de audio de WebView2 + FFT → niveles
+      ├─ art.rs              # Descarga y decodificación de la carátula
+      └─ settings.rs         # %APPDATA%\MusicRG\settings.json
 ```
 
 No hay frontend propio. La interfaz es la web de Apple Music y el proyecto solo añade la parte nativa y lo que se inyecta en la página.
@@ -159,9 +236,12 @@ No hay frontend propio. La interfaz es la web de Apple Music y el proyecto solo 
 | --- | --- |
 | `tauri` 2 (feature `tray-icon`) | Ventana, WebView2, bandeja, menús. |
 | `tauri-plugin-single-instance` | Que solo haya una instancia. |
-| `serde_json` | Escapar el CSS para meterlo en el JS. |
-| `webview2-com` | Acceso a `ICoreWebView2_19` para el nivel de memoria. |
-| `windows` / `windows-core` | `DwmSetWindowAttribute` para el color de la barra de título. |
+| `serde_json` | Escapar el CSS para meterlo en el JS y leer/guardar `settings.json`. |
+| `webview2-com` | `ICoreWebView2_19` para el nivel de memoria y `BrowserProcessId` para la captura de audio. |
+| `windows` / `windows-core` | Win32: color de la barra de título (DWM), ventanas del widget, Direct2D, DirectWrite, WIC, URLMon, WASAPI, Raw Input, registro. |
+| `windows-numerics` | Tipos de vector/matriz que usa Direct2D. |
+
+No hay crates de HTTP, imagen, audio ni FFT: todo eso lo hace Windows o unas pocas líneas propias.
 
 ## Compilar desde el código
 
@@ -190,10 +270,20 @@ Resultado:
 
 | Archivo | Qué es |
 | --- | --- |
-| `src-tauri/target/release/musicrg.exe` | Ejecutable suelto (~3 MB). |
-| `src-tauri/target/release/bundle/nsis/MusicRG_<versión>_x64-setup.exe` | Instalador (~1 MB). |
+| `src-tauri/target/release/musicrg.exe` | Ejecutable suelto (~4 MB). |
+| `src-tauri/target/release/bundle/nsis/MusicRG_<versión>_x64-setup.exe` | Instalador (~1,4 MB). |
 
 La primera compilación tarda unos minutos porque compila todas las dependencias. Las siguientes son mucho más rápidas.
+
+### Probar el widget sin reproducir música
+
+En la versión de desarrollo, la variable `MUSICRG_DEMO=1` finge una canción sonando (y `MUSICRG_DEMO_ART` le pone una carátula). La consola muestra también cada aviso `now_playing` que llega de la página.
+
+```powershell
+$env:MUSICRG_DEMO = "1"; .\src-tauri\target\debug\musicrg.exe
+```
+
+Las pruebas unitarias se lanzan con `cargo test` en `src-tauri`. Hay otras dos marcadas `#[ignore]` (captura de audio real y descarga de una carátula) que se ejecutan con `cargo test -- --ignored`.
 
 > El repositorio trae `package-lock.json` (npm) y la CI usa `npm install && npm run build`. Esos comandos también funcionan en local.
 
@@ -229,6 +319,7 @@ git push origin v0.2.0
 | --- | --- |
 | `%LOCALAPPDATA%\com.xraul.musicrg\` | Perfil de WebView2: cookies, sesión de Apple ID, caché. |
 | `%APPDATA%\MusicRG\theme.css` | Tu tema personalizado (solo si lo creas). |
+| `%APPDATA%\MusicRG\settings.json` | Widget y aviso de Bloq Mayús activados o no, y `widget_offset` si lo pones. |
 
 Para **cerrar sesión del todo** o empezar de cero: sal de MusicRG desde la bandeja y borra `%LOCALAPPDATA%\com.xraul.musicrg\`. Desinstalar la app no borra estas carpetas.
 
@@ -249,6 +340,15 @@ Comprueba que la ruta es exactamente `%APPDATA%\MusicRG\theme.css` y que has **s
 **La barra de título no tiene el color del fondo.**
 Eso solo funciona en Windows 11. En Windows 10 se queda la barra oscura del sistema.
 
+**El widget no aparece.**
+Comprueba que **Widget en la barra de tareas** está marcado en el menú de la bandeja y que la música suena de verdad (no solo cargada). Tampoco sale con la barra vertical, con la barra auto-ocultada mientras está escondida o con algo a pantalla completa.
+
+**El widget tapa el botón del tiempo u otra cosa de la barra.**
+Ajusta `"widget_offset"` en `%APPDATA%\MusicRG\settings.json` (ver [Widget](#widget-de-la-barra-de-tareas-y-aviso-de-bloq-mayús)) y reinicia MusicRG.
+
+**Las barras no se mueven.**
+En Windows 11 escuchan solo a MusicRG: si la canción está en silencio o el volumen de MusicRG en el mezclador de Windows está a cero, se quedan quietas.
+
 **Al abrir MusicRG otra vez no aparece una segunda ventana.**
 Es a propósito: solo hay una instancia y la que estaba abierta pasa al frente.
 
@@ -257,3 +357,6 @@ Es a propósito: solo hay una instancia y la que estaba abierta pasa al frente.
 - Depende de la web de Apple Music. Si Apple cambia sus clases o variables CSS, parte del tema puede dejar de aplicarse. La reproducción no se rompe porque usa MusicKit.
 - Solo Windows. El código compila en otros sistemas, pero el color de la barra de título y el ahorro de memoria solo están hechos para Windows.
 - No hay descargas sin conexión ni letras sincronizadas fuera de lo que ya ofrece la web.
+- El widget sale solo en la barra de tareas principal (no en la de otros monitores).
+- En Windows 10 (antes de la build 20348) las barras siguen todo el audio del PC, no solo a MusicRG, porque no existe la captura por proceso.
+- El control multimedia de Windows (el panel de volumen) sigue mostrando la app como `msedgewebview2.exe`: el nombre lo decide WebView2.
