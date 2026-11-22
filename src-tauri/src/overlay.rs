@@ -51,6 +51,8 @@ enum Cmd {
     Others(bool),
     Widget(bool),
     Caps(bool),
+    /// Barras del ecualizador apoyadas abajo en vez de centradas.
+    Flat(bool),
     Art(String, Vec<u8>, u32),
     #[cfg(debug_assertions)]
     DemoOsd(bool),
@@ -90,6 +92,11 @@ impl Overlay {
     }
     pub fn set_caps(&self, on: bool) {
         post(Cmd::Caps(on));
+    }
+    /// Barras apoyadas en una línea de base (como un ecualizador) en vez de
+    /// crecer desde el centro.
+    pub fn set_flat(&self, on: bool) {
+        post(Cmd::Flat(on));
     }
     /// Mostrar también lo que suena en otras apps cuando MusicRG está parada.
     pub fn set_others(&self, on: bool) {
@@ -318,6 +325,10 @@ impl State {
                     }
                 }
                 Cmd::Caps(on) => self.set_caps(on),
+                Cmd::Flat(on) => {
+                    self.widget.flat = on;
+                    self.widget.dirty = true;
+                }
                 Cmd::Art(url, px, size) => self.widget.set_art(&url, &px, size),
                 #[cfg(debug_assertions)]
                 Cmd::DemoOsd(on) => self.osd.show(&self.gfx, &self.theme, on),
@@ -625,6 +636,7 @@ unsafe fn taskbar() -> Option<Taskbar> {
 }
 
 /// Juego, vídeo o presentación a pantalla completa: mejor no pintar encima.
+///
 /// ¿Hay algo a pantalla completa en el monitor de la barra de tareas?
 ///
 /// No se usa `SHQueryUserNotificationState`: devuelve "D3D a pantalla
@@ -656,7 +668,29 @@ unsafe fn fullscreen_busy(taskbar: HWND) -> bool {
         return false;
     }
     let m = mi.rcMonitor;
-    r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+    let covers = r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom;
+    // Tapar el monitor no basta: si la barra de tareas sigue por encima (no
+    // es un juego "de verdad", o se sacó con Win / el ratón abajo), se ve, y
+    // el widget también debe verse.
+    covers && !above(taskbar, fg)
+}
+
+/// ¿`a` está por encima de `b` en el orden Z?
+unsafe fn above(a: HWND, b: HWND) -> bool {
+    let mut cur = b;
+    // Tope por si el orden Z cambia mientras se recorre.
+    for _ in 0..4096 {
+        match GetWindow(cur, GW_HWNDPREV) {
+            Ok(prev) if !prev.is_invalid() => {
+                if prev == a {
+                    return true;
+                }
+                cur = prev;
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -688,6 +722,8 @@ struct Widget {
     hover: bool,
     dirty: bool,
     relayout: bool,
+    /// Barras apoyadas abajo en vez de centradas.
+    flat: bool,
 }
 
 impl Widget {
@@ -713,6 +749,7 @@ impl Widget {
             hover: false,
             dirty: true,
             relayout: true,
+            flat: false,
         }
     }
 
@@ -858,10 +895,33 @@ impl Widget {
             SetWindowLongPtrW(self.surf.hwnd, GWLP_HWNDPARENT, tb.hwnd.0 as isize);
             self.owner = tb.hwnd;
         }
+        if !self.blocked && IsWindowVisible(self.surf.hwnd).as_bool() {
+            self.raise(tb.hwnd);
+        }
         self.relayout = false;
         // Solo se repinta si algo cambió: con la barra quieta, cero trabajo.
         self.dirty |= changed;
         true
+    }
+
+    /// Vuelve a poner el widget encima de la barra de tareas.
+    ///
+    /// Ser "propiedad" de la barra no basta: al salir de una pantalla
+    /// completa, Explorer sube la barra al frente de las ventanas siempre
+    /// encima y el widget se queda detrás, invisible, hasta que algo lo vuelve
+    /// a subir.
+    unsafe fn raise(&self, taskbar: HWND) {
+        if !above(self.surf.hwnd, taskbar) {
+            let _ = SetWindowPos(
+                self.surf.hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+            );
+        }
     }
 
     /// Un fotograma. Devuelve `true` cuando el widget acaba de esconderse del todo.
@@ -925,6 +985,9 @@ impl Widget {
         self.surf.present(self.pos.0, self.pos.1, self.alpha);
         if !IsWindowVisible(self.surf.hwnd).as_bool() {
             let _ = ShowWindow(self.surf.hwnd, SW_SHOWNOACTIVATE);
+            if !self.owner.is_invalid() {
+                self.raise(self.owner);
+            }
         }
         false
     }
@@ -976,7 +1039,8 @@ impl Widget {
         for (i, v) in self.bars.iter().enumerate() {
             let bh = min_h + (max_h - min_h) * v;
             let x = bx + i as f32 * (bw + gap);
-            let y = (h - bh) / 2.0;
+            // Centradas, o todas apoyadas en la misma base (la de la barra más alta).
+            let y = if self.flat { (h + max_h) / 2.0 - bh } else { (h - bh) / 2.0 };
             let mut c = theme.accent;
             c.a = 0.55 + 0.45 * v;
             self.surf.fill(&rrect(x, y, x + bw, y + bh, bw / 2.0), c);

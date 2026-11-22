@@ -2,6 +2,7 @@
 
 mod art;
 mod audio;
+mod autostart;
 mod media;
 mod overlay;
 mod settings;
@@ -9,10 +10,66 @@ mod updater;
 
 use overlay::{NowPlaying, Overlay};
 use tauri::{
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, Theme, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    AppHandle, Manager, Theme, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent, Wry,
 };
+
+/// Submenú "Pinned" de la bandeja: lo que el usuario tiene en Destacar.
+struct Pins {
+    menu: Submenu<Wry>,
+    state: std::sync::Mutex<PinsState>,
+}
+
+#[derive(Default)]
+struct PinsState {
+    /// Nombres en el orden del menú.
+    names: Vec<String>,
+    /// La lista viene de la página abierta ahora (no de la caché): sus
+    /// posiciones coinciden con las de shell.js.
+    live: bool,
+    /// Pedido desde la bandeja con el reproductor aún cargando.
+    pending: Option<String>,
+}
+
+/// Rehace el submenú con esta lista.
+fn fill_pins(app: &AppHandle, sub: &Submenu<Wry>, names: &[String]) {
+    if let Ok(items) = sub.items() {
+        for item in items {
+            let _ = sub.remove(&item);
+        }
+    }
+    for (i, name) in names.iter().enumerate() {
+        let label: String = name.chars().take(60).collect::<String>().replace('&', "&&");
+        if let Ok(item) = MenuItem::with_id(app, format!("pin:{i}"), label, true, None::<&str>) {
+            let _ = sub.append(&item);
+        }
+    }
+    if names.is_empty() {
+        if let Ok(item) = MenuItem::with_id(app, "pin:none", "Nothing pinned", false, None::<&str>) {
+            let _ = sub.append(&item);
+        }
+    }
+}
+
+/// Clic en algo de "Pinned". Si el reproductor no está abierto (arranque con
+/// Windows) se abre escondido y suena en cuanto la página tenga la lista.
+fn play_pin(app: &AppHandle, i: usize) {
+    let pins = app.state::<Pins>();
+    let mut st = pins.state.lock().unwrap();
+    let Some(name) = st.names.get(i).cloned() else { return };
+    match app.get_webview_window("main") {
+        Some(win) if st.live => {
+            let _ = win.eval(format!("window.__rg&&window.__rg.playPin({i})"));
+        }
+        win => {
+            st.pending = Some(name);
+            if win.is_none() {
+                open_player(app, false);
+            }
+        }
+    }
+}
 
 const URL: &str = "https://music.apple.com/";
 const THEME_CSS: &str = include_str!("../inject/theme.css");
@@ -34,6 +91,16 @@ const BROWSER_ARGS: &str = concat!(
     " --no-pings",
 );
 
+/// Solo en desarrollo: MUSICRG_DEBUG_PORT=9222 abre la depuración remota de
+/// Chromium para inspeccionar la página desde fuera.
+fn browser_args() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(port) = std::env::var("MUSICRG_DEBUG_PORT") {
+        return format!("{BROWSER_ARGS} --remote-debugging-port={port}");
+    }
+    BROWSER_ARGS.to_string()
+}
+
 /// La página avisa de cada cambio de canción o de play/pausa (ver shell.js).
 #[tauri::command]
 fn now_playing(overlay: tauri::State<Overlay>, playing: bool, title: String, artist: String, art: String) {
@@ -46,6 +113,28 @@ fn now_playing(overlay: tauri::State<Overlay>, playing: bool, title: String, art
     }
     let clip = |s: String| s.chars().take(300).collect::<String>();
     overlay.now_playing(NowPlaying { playing, title: clip(title), artist: clip(artist), art: clip(art) });
+}
+
+/// La página manda los nombres de lo que hay en Destacar (ver shell.js), en
+/// orden. Al pulsar uno, la página reproduce el de esa posición: aquí solo
+/// viajan nombres, nada que se vaya a ejecutar.
+#[tauri::command]
+fn pins(app: AppHandle, pins: tauri::State<Pins>, names: Vec<String>) {
+    let names: Vec<String> = names.into_iter().take(30).map(|n| n.chars().take(200).collect()).collect();
+    let mut st = pins.state.lock().unwrap();
+    if st.names != names {
+        fill_pins(&app, &pins.menu, &names);
+        if let Ok(dir) = app.path().config_dir() {
+            settings::save_pins(&dir, &names);
+        }
+    }
+    st.names = names;
+    st.live = true;
+    if let Some(want) = st.pending.take() {
+        if let (Some(i), Some(win)) = (st.names.iter().position(|n| *n == want), app.get_webview_window("main")) {
+            let _ = win.eval(format!("window.__rg&&window.__rg.playPin({i})"));
+        }
+    }
 }
 
 /// Botones propios de la ventana (no hay barra de título nativa). Solo estas
@@ -73,15 +162,17 @@ fn main() {
     }
     builder
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![now_playing, window_ctl])
+        .invoke_handler(tauri::generate_handler![now_playing, window_ctl, pins])
         .setup(move |app| {
             let config_dir = app.path().config_dir().ok();
             let prefs = config_dir
                 .as_deref()
                 .map(settings::load)
-                .unwrap_or(settings::Settings { widget: true, caps: true, others: true });
+                .unwrap_or(settings::Settings { widget: true, caps: true, others: true, flat: false });
             let handle = app.handle().clone();
-            app.manage(Overlay::spawn(prefs.widget, prefs.caps, prefs.others, move || show(&handle)));
+            let overlay = Overlay::spawn(prefs.widget, prefs.caps, prefs.others, move || show(&handle));
+            overlay.set_flat(prefs.flat);
+            app.manage(overlay);
             // Lo que suena en otras apps (navegador, Spotify...) para el widget.
             media::spawn(overlay::external);
             // Solo en desarrollo: MUSICRG_DEMO=1 finge una canción sonando para
@@ -110,31 +201,12 @@ fn main() {
                 });
             }
 
-            let css = match app.path().config_dir() {
-                Ok(dir) => {
-                    let user = std::fs::read_to_string(dir.join("MusicRG").join("theme.css"))
-                        .unwrap_or_default();
-                    format!("{THEME_CSS}\n{user}")
-                }
-                Err(_) => THEME_CSS.to_string(),
-            };
-            let script = SHELL_JS.replace("__RG_CSS__", &serde_json::to_string(&css)?);
-
-            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(URL.parse()?))
-                .title("MusicRG")
-                .inner_size(1180.0, 760.0)
-                .min_inner_size(420.0, 320.0)
-                .center()
-                // Sin barra de título: la página ocupa toda la ventana y
-                // shell.js pone los botones de minimizar / maximizar / cerrar.
-                .decorations(false)
-                .shadow(true)
-                .theme(Some(Theme::Dark))
-                .background_color(tauri::webview::Color(BG.0, BG.1, BG.2, 255))
-                .additional_browser_args(BROWSER_ARGS)
-                .initialization_script(&script)
-                .build()?;
-            remember_browser_pid(&win);
+            // Arrancada por Windows al iniciar sesión: solo widget, aviso de
+            // Bloq Mayús y bandeja. El reproductor (WebView2, cientos de MB) no
+            // se crea hasta que se pide.
+            if !autostart::launched_at_login() {
+                open_player(app.handle(), true);
+            }
 
             let widget_item = CheckMenuItem::with_id(
                 app, "widget", "Taskbar widget", true, prefs.widget, None::<&str>,
@@ -145,18 +217,41 @@ fn main() {
             let others_item = CheckMenuItem::with_id(
                 app, "others", "Show other apps in widget", true, prefs.others, None::<&str>,
             )?;
+            let flat_item = CheckMenuItem::with_id(
+                app, "flat", "Flat audio bars", true, prefs.flat, None::<&str>,
+            )?;
+            let autostart_item = CheckMenuItem::with_id(
+                app, "autostart", "Start with Windows", true, autostart::enabled(), None::<&str>,
+            )?;
+            // Primero la última lista guardada; la página la actualiza al cargar.
+            let pins_menu = Submenu::with_id(app, "pins", "Pinned", true)?;
+            let cached = config_dir.as_deref().map(settings::load_pins).unwrap_or_default();
+            fill_pins(app.handle(), &pins_menu, &cached);
+            app.manage(Pins {
+                menu: pins_menu.clone(),
+                state: std::sync::Mutex::new(PinsState { names: cached, ..Default::default() }),
+            });
             let update_item = updater::menu_item(app.handle())?;
-            let (wi, ci, oi) = (widget_item.clone(), caps_item.clone(), others_item.clone());
+            let (wi, ci, oi, fi, ai) = (
+                widget_item.clone(),
+                caps_item.clone(),
+                others_item.clone(),
+                flat_item.clone(),
+                autostart_item.clone(),
+            );
             let menu = Menu::with_items(
                 app,
                 &[
                     &MenuItem::with_id(app, "toggle", "Play / Pause", true, None::<&str>)?,
                     &MenuItem::with_id(app, "next", "Next", true, None::<&str>)?,
                     &MenuItem::with_id(app, "prev", "Previous", true, None::<&str>)?,
+                    &pins_menu,
                     &PredefinedMenuItem::separator(app)?,
                     &widget_item,
                     &others_item,
+                    &flat_item,
                     &caps_item,
+                    &autostart_item,
                     &PredefinedMenuItem::separator(app)?,
                     &update_item,
                     &MenuItem::with_id(app, "show", "Show MusicRG", true, None::<&str>)?,
@@ -171,16 +266,28 @@ fn main() {
                     "show" => show(app),
                     "quit" => app.exit(0),
                     "update" => updater::on_click(app),
-                    "widget" | "caps" | "others" => {
+                    "autostart" => {
+                        autostart::set(ai.is_checked().unwrap_or(false));
+                        // Lo que diga el registro, por si no se pudo escribir.
+                        let _ = ai.set_checked(autostart::enabled());
+                    }
+                    id if id.starts_with("pin:") => {
+                        if let Ok(i) = id[4..].parse::<usize>() {
+                            play_pin(app, i);
+                        }
+                    }
+                    "widget" | "caps" | "others" | "flat" => {
                         let prefs = settings::Settings {
                             widget: wi.is_checked().unwrap_or(true),
                             caps: ci.is_checked().unwrap_or(true),
                             others: oi.is_checked().unwrap_or(true),
+                            flat: fi.is_checked().unwrap_or(false),
                         };
                         let overlay = app.state::<Overlay>();
                         overlay.set_widget(prefs.widget);
                         overlay.set_caps(prefs.caps);
                         overlay.set_others(prefs.others);
+                        overlay.set_flat(prefs.flat);
                         if let Some(dir) = &config_dir {
                             settings::save(dir, prefs);
                         }
@@ -223,12 +330,67 @@ fn main() {
 }
 
 fn show(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        set_low_memory(&win, false);
-        let _ = win.unminimize();
-        let _ = win.show();
-        let _ = win.set_focus();
+    match app.get_webview_window("main") {
+        Some(win) => {
+            set_low_memory(&win, false);
+            let _ = win.unminimize();
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+        None => open_player(app, true),
     }
+}
+
+/// Crea la ventana del reproductor (la página de Apple Music). Se hace en
+/// otro hilo: crear un WebView2 desde un evento del hilo principal puede
+/// bloquear la app en Windows.
+fn open_player(app: &AppHandle, visible: bool) {
+    static OPENING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if OPENING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if app.get_webview_window("main").is_none() {
+            if let Err(e) = build_player(&app, visible) {
+                eprintln!("[musicrg] no se pudo abrir el reproductor: {e}");
+            }
+        }
+        OPENING.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
+}
+
+fn build_player(app: &AppHandle, visible: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let css = match app.path().config_dir() {
+        Ok(dir) => {
+            let user = std::fs::read_to_string(dir.join("MusicRG").join("theme.css")).unwrap_or_default();
+            format!("{THEME_CSS}\n{user}")
+        }
+        Err(_) => THEME_CSS.to_string(),
+    };
+    let script = SHELL_JS.replace("__RG_CSS__", &serde_json::to_string(&css)?);
+    let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(URL.parse()?))
+        .title("MusicRG")
+        .visible(visible)
+        .inner_size(1180.0, 760.0)
+        .min_inner_size(420.0, 320.0)
+        .center()
+        // Sin barra de título: la página ocupa toda la ventana y
+        // shell.js pone los botones de minimizar / maximizar / cerrar.
+        .decorations(false)
+        .shadow(true)
+        .theme(Some(Theme::Dark))
+        .background_color(tauri::webview::Color(BG.0, BG.1, BG.2, 255))
+        .additional_browser_args(&browser_args())
+        .initialization_script(&script)
+        .build()?;
+    remember_browser_pid(&win);
+    if visible {
+        let _ = win.set_focus();
+    } else {
+        set_low_memory(&win, true);
+    }
+    Ok(())
 }
 
 /// Con la ventana en la bandeja, pide a WebView2 que suelte la memoria que

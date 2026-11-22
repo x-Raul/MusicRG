@@ -40,6 +40,9 @@
       return null;
     }
   };
+  // Lo que hay en "Destacar", en el orden de la barra lateral. Rust solo
+  // recibe los nombres; al pulsar uno en la bandeja pide la posición.
+  let pins = [];
   window.__rg = {
     cmd(name) {
       const m = kit();
@@ -48,7 +51,63 @@
       if (name === "next") return m.skipToNextItem();
       if (name === "prev") return m.skipToPreviousItem();
     },
+    playPin(i) {
+      const m = kit();
+      const p = pins[i];
+      if (!m || !p) return;
+      m.setQueue({ [p.kind]: p.id, startPlaying: true }).catch(() => {});
+    },
   };
+
+  // La lista sale de la API de la biblioteca (la misma que usa la página).
+  // Se vuelve a pedir solo cuando cambia lo que se ve en Destacar.
+  let pinsKey = null;
+  let pinsSent = null;
+  let pinsWait = 0;
+  const loadPins = async () => {
+    const m = kit();
+    if (!m || !m.isAuthorized) {
+      // MusicKit aún cargando (o sin sesión): se reintenta un rato.
+      if (pinsWait++ < 40) setTimeout(loadPins, 3000);
+      return;
+    }
+    pinsWait = 0;
+    try {
+      const r = await m.api.music("/v1/me/library/pins");
+      pins = ((r && r.data && r.data.data) || [])
+        .map((d) => {
+          const at = d.attributes || {};
+          const pp = at.playParams || {};
+          return { name: at.name || "", kind: pp.kind, id: pp.id };
+        })
+        .filter((p) => p.name && p.id && ["playlist", "album", "song", "station"].includes(p.kind));
+    } catch (_) {
+      return;
+    }
+    const names = pins.map((p) => p.name);
+    const key = JSON.stringify(names);
+    if (key === pinsSent) return;
+    pinsSent = key;
+    try {
+      const ipc = window.__TAURI_INTERNALS__;
+      if (ipc) ipc.invoke("pins", { names }).catch(() => {});
+    } catch (_) {}
+  };
+  // La página cambia el DOM sin parar: como mucho una comprobación por segundo.
+  let pinsCheck = 0;
+  const watchPins = () => {
+    if (pinsCheck) return;
+    pinsCheck = setTimeout(() => {
+      pinsCheck = 0;
+      const folder = document.querySelector('[data-testid="library.pins.folder"]');
+      const li = folder && folder.closest("li");
+      const key = li ? li.textContent : "";
+      if (key === pinsKey) return;
+      pinsKey = key;
+      loadPins();
+    }, 1000);
+  };
+  new MutationObserver(watchPins).observe(document, { childList: true, subtree: true });
 
   // Ventana sin barra de título: botones propios arriba a la derecha y la
   // franja superior de la página sirve para arrastrar (doble clic = maximizar).

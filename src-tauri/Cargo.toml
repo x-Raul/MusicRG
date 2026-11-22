@@ -1,6 +1,6 @@
 [package]
 name = "musicrg"
-version = "0.1.0"
+version = "1.1.0"
 description = "Reproductor ligero de Apple Music para Windows"
 edition = "2021"
 

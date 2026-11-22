@@ -10,6 +10,10 @@ Además trae un **widget sobre la barra de tareas** con la canción que suena y 
 
 > No está afiliado a Apple. Necesitas una suscripción a Apple Music.
 
+[![Descargar MusicRG](https://img.shields.io/github/v/release/x-Raul/MusicRG?label=Descargar&logo=windows&style=for-the-badge)](https://github.com/x-Raul/MusicRG/releases/latest)
+
+**[⬇ Descargar la última versión](https://github.com/x-Raul/MusicRG/releases/latest)**: en la página del release, baja `MusicRG_<versión>_x64-setup.exe` (en *Assets*) y ábrelo.
+
 ---
 
 ## Índice
@@ -41,7 +45,7 @@ Además trae un **widget sobre la barra de tareas** con la canción que suena y 
 
 Hay dos maneras:
 
-1. **Instalador** (`MusicRG_<versión>_x64-setup.exe`): lo encuentras en **Releases** cuando hay una versión etiquetada, o en la pestaña **Actions** del repositorio, dentro del artefacto `MusicRG-windows` de cualquier ejecución. Instala la app para tu usuario y crea un acceso en el menú Inicio.
+1. **Instalador** (`MusicRG_<versión>_x64-setup.exe`): lo encuentras en **[Releases](https://github.com/x-Raul/MusicRG/releases/latest)**, o en la pestaña **Actions** del repositorio, dentro del artefacto `MusicRG-windows` de cualquier ejecución. Instala la app para tu usuario y crea un acceso en el menú Inicio.
 2. **Ejecutable suelto** (`musicrg.exe`): viene en el mismo artefacto. Funciona sin instalar nada, aunque necesita que WebView2 ya esté en el sistema.
 
 Para desinstalarla: *Configuración → Aplicaciones → MusicRG → Desinstalar*.
@@ -53,7 +57,8 @@ Para desinstalarla: *Configuración → Aplicaciones → MusicRG → Desinstalar
 | Abrir la app | Carga Apple Music. Inicias sesión con tu Apple ID como en la web, y la sesión se queda guardada. |
 | Cerrar la ventana (✕) | La ventana se esconde en la bandeja del sistema y **la música sigue sonando**. |
 | Clic izquierdo en el icono de la bandeja | Vuelve a mostrar la ventana y la pone delante. |
-| Clic derecho en el icono de la bandeja | Abre un menú con **Play / Pause**, **Next**, **Previous**, las casillas **Taskbar widget**, **Show other apps in widget** y **Caps Lock toast**, **Check for updates**, **Show MusicRG** y **Quit**. |
+| Clic derecho en el icono de la bandeja | Abre un menú con **Play / Pause**, **Next**, **Previous**, **Pinned** (tus elementos de *Destacar*, para ponerlos a sonar), las casillas **Taskbar widget**, **Show other apps in widget**, **Flat audio bars**, **Caps Lock toast** y **Start with Windows**, **Check for updates**, **Show MusicRG** y **Quit**. |
+| Iniciar con Windows | Al arrancar el PC solo se encienden el widget, el aviso de Bloq Mayús y la bandeja (unos 5 MB). Apple Music se carga cuando abres la ventana o eliges algo de **Pinned**. |
 | Clic en el widget de la barra de tareas | Muestra la ventana de MusicRG. |
 | Volver a abrir MusicRG con la app ya en marcha | No arranca otra copia: muestra la que ya estaba abierta. |
 | Teclas multimedia / control de medios de Windows | Funcionan, porque la web de Apple Music usa la Media Session API. |
