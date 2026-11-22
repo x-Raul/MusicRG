@@ -625,11 +625,38 @@ unsafe fn taskbar() -> Option<Taskbar> {
 }
 
 /// Juego, vídeo o presentación a pantalla completa: mejor no pintar encima.
-unsafe fn fullscreen_busy() -> bool {
-    matches!(
-        SHQueryUserNotificationState(),
-        Ok(QUNS_BUSY) | Ok(QUNS_RUNNING_D3D_FULL_SCREEN) | Ok(QUNS_PRESENTATION_MODE)
-    )
+/// ¿Hay algo a pantalla completa en el monitor de la barra de tareas?
+///
+/// No se usa `SHQueryUserNotificationState`: devuelve "D3D a pantalla
+/// completa" aunque esa app esté en segundo plano (overlays, juegos
+/// minimizados...), y el widget se quedaba escondido sin motivo. Aquí se mira
+/// lo que de verdad importa: si la ventana activa tapa todo ese monitor.
+unsafe fn fullscreen_busy(taskbar: HWND) -> bool {
+    if matches!(SHQueryUserNotificationState(), Ok(QUNS_PRESENTATION_MODE)) {
+        return true;
+    }
+    let fg = GetForegroundWindow();
+    if fg.is_invalid() {
+        return false;
+    }
+    let mut buf = [0u16; 64];
+    let n = GetClassNameW(fg, &mut buf).max(0) as usize;
+    let class = String::from_utf16_lossy(&buf[..n]);
+    // Escritorio y barras de tareas también "ocupan" el monitor entero.
+    if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
+        return false;
+    }
+    let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+    if mon != MonitorFromWindow(taskbar, MONITOR_DEFAULTTONEAREST) {
+        return false;
+    }
+    let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let mut r = RECT::default();
+    if !GetMonitorInfoW(mon, &mut mi).as_bool() || GetWindowRect(fg, &mut r).is_err() {
+        return false;
+    }
+    let m = mi.rcMonitor;
+    r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
 }
 
 // ---------------------------------------------------------------------------
@@ -776,7 +803,7 @@ impl Widget {
             self.blocked = true;
             return false;
         };
-        self.blocked = fullscreen_busy();
+        self.blocked = fullscreen_busy(tb.hwnd);
         let s = tb.scale;
         if (s - self.scale).abs() > 0.01 {
             self.scale = s;
