@@ -8,6 +8,11 @@
 //! software sobre ventanas *layered*: sin otro WebView, sin GPU y sin
 //! temporizadores cuando no hay nada en pantalla. Con la música en pausa este
 //! hilo está dormido; solo despierta con un mensaje (canción nueva, tecla).
+//!
+//! Sobre `unsafe`: las `unsafe fn` de este módulo envuelven Win32, Direct2D y
+//! DirectWrite. Su única condición es la misma para todas: llamarlas desde el
+//! hilo `rg-overlay` (COM iniciado allí), con los handles y objetos COM que
+//! posee `State`, que viven tanto como el bucle de mensajes.
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -35,6 +40,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::art;
 use crate::audio::{Capture, Levels, Source, BANDS};
+use crate::lock::lock;
 use crate::media;
 
 #[derive(Clone, Default, PartialEq, Debug)]
@@ -76,11 +82,16 @@ const HIDE_DELAY: Duration = Duration::from_millis(900);
 /// Mando a distancia del hilo de las ventanas. Se puede usar desde cualquier hilo.
 pub struct Overlay;
 
+// Los métodos piden `&self` a propósito: tener un `Overlay` demuestra que el
+// hilo se lanzó (`spawn`), aunque el estado viva en `SHARED`.
+#[allow(clippy::unused_self)]
 impl Overlay {
     pub fn spawn(widget: bool, caps: bool, others: bool, on_click: impl Fn() + Send + 'static) -> Self {
         let _ = SHARED.set(Shared { widget: AtomicIsize::new(0), inbox: Mutex::new(Vec::new()) });
         let _ = std::thread::Builder::new()
             .name("rg-overlay".into())
+            // SAFETY: este hilo nuevo es el hilo `rg-overlay`; `thread_main`
+            // inicia COM en él y no sale de él.
             .spawn(move || unsafe { thread_main(widget, caps, others, Box::new(on_click)) });
         Overlay
     }
@@ -116,12 +127,12 @@ pub fn external(np: NowPlaying) {
 
 fn post(cmd: Cmd) {
     let Some(sh) = SHARED.get() else { return };
-    sh.inbox.lock().unwrap().push(cmd);
+    lock(&sh.inbox).push(cmd);
     let h = sh.widget.load(Ordering::Acquire);
     if h != 0 {
-        unsafe {
-            let _ = PostMessageW(Some(HWND(h as _)), WM_RG, WPARAM(0), LPARAM(0));
-        }
+        // SAFETY: `PostMessageW` admite cualquier handle (si la ventana ya no
+        // existe, solo falla) y no lleva punteros en los parámetros.
+        let _ = unsafe { PostMessageW(Some(HWND(h as _)), WM_RG, WPARAM(0), LPARAM(0)) };
     }
 }
 
@@ -130,6 +141,8 @@ thread_local! {
     static ON_CLICK: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
 }
 
+/// # Safety
+/// Solo desde el hilo propio que lanza `Overlay::spawn`.
 unsafe fn thread_main(widget_on: bool, caps_on: bool, others_on: bool, on_click: Box<dyn Fn() + Send>) {
     let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     let Ok(hinst) = GetModuleHandleW(None) else { return };
@@ -145,17 +158,17 @@ unsafe fn thread_main(widget_on: bool, caps_on: bool, others_on: bool, on_click:
     let make = |ex, title: PCWSTR| {
         CreateWindowExW(ex, class, title, WS_POPUP, 0, 0, 1, 1, None, None, Some(hinst.into()), None)
     };
-    let (Ok(wh), Ok(oh)) = (
-        make(ex, w!("MusicRG - now playing")),
-        make(ex | WS_EX_TRANSPARENT, w!("MusicRG - Caps Lock")),
-    ) else {
+    let (Ok(wh), Ok(oh)) =
+        (make(ex, w!("MusicRG - now playing")), make(ex | WS_EX_TRANSPARENT, w!("MusicRG - Caps Lock")))
+    else {
         return;
     };
     let Some(gfx) = Gfx::new() else { return };
+    let (Some(widget), Some(osd)) = (Widget::new(wh, &gfx), Osd::new(oh, &gfx)) else { return };
     ON_CLICK.with(|c| *c.borrow_mut() = Some(on_click));
     let mut st = State {
-        widget: Widget::new(wh, &gfx),
-        osd: Osd::new(oh, &gfx),
+        widget,
+        osd,
         gfx,
         capture: Capture::default(),
         theme: Theme::read(),
@@ -168,12 +181,14 @@ unsafe fn thread_main(widget_on: bool, caps_on: bool, others_on: bool, on_click:
     };
     st.set_caps(caps_on);
     STATE.with(|s| *s.borrow_mut() = Some(st));
-    SHARED.get().unwrap().widget.store(wh.0 as isize, Ordering::Release);
+    if let Some(sh) = SHARED.get() {
+        sh.widget.store(wh.0 as isize, Ordering::Release);
+    }
     with_state(|s| s.drain());
 
     let mut msg = MSG::default();
-    while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-        DispatchMessageW(&msg);
+    while GetMessageW(&raw mut msg, None, 0, 0).as_bool() {
+        DispatchMessageW(&raw const msg);
     }
 }
 
@@ -186,19 +201,19 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         WM_LBUTTONUP => {
             // Con otra app sonando, el widget no es de MusicRG: no la abre.
-            let own = STATE.with(|s| s.try_borrow().ok().and_then(|g| g.as_ref().map(|st| st.source == Source::MusicRG)));
+            let own =
+                STATE.with(|s| s.try_borrow().ok().and_then(|g| g.as_ref().map(|st| st.source == Source::MusicRG)));
             if own == Some(false) {
                 return LRESULT(0);
             }
             ON_CLICK.with(|c| {
                 if let Some(f) = c.borrow().as_ref() {
-                    f()
+                    f();
                 }
             });
             return LRESULT(0);
         }
-        WM_RG | WM_TIMER | WM_INPUT | WM_MOUSEMOVE | WM_MOUSELEAVE | WM_SETTINGCHANGE
-        | WM_DISPLAYCHANGE => {
+        WM_RG | WM_TIMER | WM_INPUT | WM_MOUSEMOVE | WM_MOUSELEAVE | WM_SETTINGCHANGE | WM_DISPLAYCHANGE => {
             with_state(|s| s.on_msg(h, m, wp, lp));
         }
         _ => {}
@@ -237,7 +252,7 @@ impl State {
                 T_OSD => self.osd.tick(),
                 T_CAPS => {
                     let _ = KillTimer(Some(h), T_CAPS);
-                    let on = GetKeyState(VK_CAPITAL.0 as i32) & 1 != 0;
+                    let on = GetKeyState(i32::from(VK_CAPITAL.0)) & 1 != 0;
                     self.osd.show(&self.gfx, &self.theme, on);
                 }
                 _ => {}
@@ -258,7 +273,7 @@ impl State {
                         hwndTrack: h,
                         dwHoverTime: 0,
                     };
-                    let _ = TrackMouseEvent(&mut t);
+                    let _ = TrackMouseEvent(&raw mut t);
                 }
             }
             WM_MOUSELEAVE if h == self.widget.surf.hwnd => {
@@ -299,7 +314,8 @@ impl State {
     }
 
     unsafe fn drain(&mut self) {
-        let cmds = std::mem::take(&mut *SHARED.get().unwrap().inbox.lock().unwrap());
+        let Some(sh) = SHARED.get() else { return };
+        let cmds = std::mem::take(&mut *lock(&sh.inbox));
         for cmd in cmds {
             match cmd {
                 Cmd::Now(np) => {
@@ -359,15 +375,15 @@ unsafe fn caps_released(lp: LPARAM) -> bool {
     let n = GetRawInputData(
         HRAWINPUT(lp.0 as _),
         RID_INPUT,
-        Some(&mut ri as *mut _ as *mut _),
-        &mut size,
+        Some((&raw mut ri).cast()),
+        &raw mut size,
         std::mem::size_of::<RAWINPUTHEADER>() as u32,
     );
     if n == u32::MAX || ri.header.dwType != RIM_TYPEKEYBOARD.0 {
         return false;
     }
     let kb = ri.data.keyboard;
-    kb.VKey == VK_CAPITAL.0 && kb.Flags as u32 & RI_KEY_BREAK != 0
+    kb.VKey == VK_CAPITAL.0 && u32::from(kb.Flags) & RI_KEY_BREAK != 0
 }
 
 // ---------------------------------------------------------------------------
@@ -384,21 +400,21 @@ impl Gfx {
         let d2d: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).ok()?;
         let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
         let mut coll = None;
-        dw.GetSystemFontCollection(&mut coll, false).ok()?;
+        dw.GetSystemFontCollection(&raw mut coll, false).ok()?;
         let coll = coll?;
         let has = |name: &HSTRING| {
             let (mut i, mut ok) = (0u32, BOOL(0));
-            coll.FindFamilyName(name, &mut i, &mut ok).is_ok() && ok.as_bool()
+            coll.FindFamilyName(name, &raw mut i, &raw mut ok).is_ok() && ok.as_bool()
         };
         let pick = |a: &str, b: &str| {
             let a = HSTRING::from(a);
-            if has(&a) { a } else { HSTRING::from(b) }
+            if has(&a) {
+                a
+            } else {
+                HSTRING::from(b)
+            }
         };
-        Some(Self {
-            ui: pick("Segoe UI Variable Text", "Segoe UI"),
-            d2d,
-            dw,
-        })
+        Some(Self { ui: pick("Segoe UI Variable Text", "Segoe UI"), d2d, dw })
     }
 
     unsafe fn layout(
@@ -423,12 +439,9 @@ impl Gfx {
             .ok()?;
         let _ = fmt.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         if let Ok(sign) = self.dw.CreateEllipsisTrimmingSign(&fmt) {
-            let trim = DWRITE_TRIMMING {
-                granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-                delimiter: 0,
-                delimiterCount: 0,
-            };
-            let _ = fmt.SetTrimming(&trim, &sign);
+            let trim =
+                DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, delimiter: 0, delimiterCount: 0 };
+            let _ = fmt.SetTrimming(&raw const trim, &sign);
         }
         let wide: Vec<u16> = text.encode_utf16().collect();
         self.dw.CreateTextLayout(&wide, &fmt, max_w, size * 2.0).ok()
@@ -437,9 +450,8 @@ impl Gfx {
 
 fn text_width(l: &IDWriteTextLayout) -> f32 {
     let mut m = DWRITE_TEXT_METRICS::default();
-    unsafe {
-        let _ = l.GetMetrics(&mut m);
-    }
+    // SAFETY: `l` es un objeto COM vivo y `m` una variable local.
+    let _ = unsafe { l.GetMetrics(&raw mut m) };
     m.widthIncludingTrailingWhitespace
 }
 
@@ -453,11 +465,7 @@ fn rgba(hex: u32, a: f32) -> D2D1_COLOR_F {
 }
 
 fn rrect(l: f32, t: f32, r: f32, b: f32, rad: f32) -> D2D1_ROUNDED_RECT {
-    D2D1_ROUNDED_RECT {
-        rect: D2D_RECT_F { left: l, top: t, right: r, bottom: b },
-        radiusX: rad,
-        radiusY: rad,
-    }
+    D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: l, top: t, right: r, bottom: b }, radiusX: rad, radiusY: rad }
 }
 
 /// Ventana layered + mapa de bits en memoria + render target de Direct2D.
@@ -472,7 +480,7 @@ struct Surface {
 }
 
 impl Surface {
-    unsafe fn new(hwnd: HWND, gfx: &Gfx) -> Self {
+    unsafe fn new(hwnd: HWND, gfx: &Gfx) -> Option<Self> {
         let props = D2D1_RENDER_TARGET_PROPERTIES {
             r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
             pixelFormat: D2D1_PIXEL_FORMAT {
@@ -483,10 +491,10 @@ impl Surface {
             dpiY: 96.0,
             ..Default::default()
         };
-        let rt = gfx.d2d.CreateDCRenderTarget(&props).expect("d2d");
+        let rt = gfx.d2d.CreateDCRenderTarget(&raw const props).ok()?;
         rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-        let brush = rt.CreateSolidColorBrush(&rgba(0xffffff, 1.0), None).expect("brush");
-        Self { hwnd, w: 0, h: 0, dc: CreateCompatibleDC(None), bmp: HBITMAP::default(), rt, brush }
+        let brush = rt.CreateSolidColorBrush(&rgba(0x00ff_ffff, 1.0), None).ok()?;
+        Some(Self { hwnd, w: 0, h: 0, dc: CreateCompatibleDC(None), bmp: HBITMAP::default(), rt, brush })
     }
 
     unsafe fn resize(&mut self, w: i32, h: i32) {
@@ -506,8 +514,7 @@ impl Surface {
             ..Default::default()
         };
         let mut bits = std::ptr::null_mut();
-        let Ok(bmp) = CreateDIBSection(Some(self.dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
-        else {
+        let Ok(bmp) = CreateDIBSection(Some(self.dc), &raw const bmi, DIB_RGB_COLORS, &raw mut bits, None, 0) else {
             return;
         };
         SelectObject(self.dc, bmp.into());
@@ -520,12 +527,12 @@ impl Surface {
     }
 
     unsafe fn fill(&self, r: &D2D1_ROUNDED_RECT, c: D2D1_COLOR_F) {
-        self.brush.SetColor(&c);
+        self.brush.SetColor(&raw const c);
         self.rt.FillRoundedRectangle(r, &self.brush);
     }
 
     unsafe fn text(&self, l: &IDWriteTextLayout, x: f32, y: f32, c: D2D1_COLOR_F) {
-        self.brush.SetColor(&c);
+        self.brush.SetColor(&raw const c);
         self.rt.DrawTextLayout(Vector2 { X: x, Y: y }, l, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
     }
 
@@ -544,7 +551,7 @@ impl Surface {
             Some(self.dc),
             Some(&POINT { x: 0, y: 0 }),
             COLORREF(0),
-            Some(&blend),
+            Some(&raw const blend),
             ULW_ALPHA,
         );
         #[cfg(debug_assertions)]
@@ -564,7 +571,7 @@ struct Theme {
     accent: D2D1_COLOR_F,
 }
 
-const PERSONALIZE: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+pub(crate) const PERSONALIZE: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
 const ACCENT: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent");
 const ADVANCED: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced");
 
@@ -576,31 +583,45 @@ impl Theme {
         let accent = if reg_bin(ACCENT, w!("AccentPalette"), &mut pal) {
             let i = if light { 4 } else { 1 };
             let c = &pal[i * 4..i * 4 + 3];
-            rgba((c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32, 1.0)
+            rgba(u32::from(c[0]) << 16 | u32::from(c[1]) << 8 | u32::from(c[2]), 1.0)
         } else if light {
-            rgba(0x005fb8, 1.0)
+            rgba(0x0000_5fb8, 1.0)
         } else {
-            rgba(0x7dd3fc, 1.0)
+            rgba(0x007d_d3fc, 1.0)
         };
         Self { light, accent }
     }
     fn fg(&self) -> u32 {
-        if self.light { 0x000000 } else { 0xffffff }
+        if self.light {
+            0x0000_0000
+        } else {
+            0x00ff_ffff
+        }
     }
 }
 
-fn reg_dword(path: PCWSTR, name: PCWSTR) -> Option<u32> {
+pub(crate) fn reg_dword(path: PCWSTR, name: PCWSTR) -> Option<u32> {
     let (mut v, mut n) = (0u32, 4u32);
+    // SAFETY: `v` y `n` son locales; `n` dice el tamaño real de `v` (4 bytes).
     let r = unsafe {
-        RegGetValueW(HKEY_CURRENT_USER, path, name, RRF_RT_REG_DWORD, None, Some(&mut v as *mut _ as *mut _), Some(&mut n))
+        RegGetValueW(HKEY_CURRENT_USER, path, name, RRF_RT_REG_DWORD, None, Some((&raw mut v).cast()), Some(&raw mut n))
     };
     (r == ERROR_SUCCESS).then_some(v)
 }
 
 fn reg_bin(path: PCWSTR, name: PCWSTR, buf: &mut [u8]) -> bool {
     let mut n = buf.len() as u32;
+    // SAFETY: `buf` vive toda la llamada y `n` es su tamaño real en bytes.
     let r = unsafe {
-        RegGetValueW(HKEY_CURRENT_USER, path, name, RRF_RT_REG_BINARY, None, Some(buf.as_mut_ptr() as *mut _), Some(&mut n))
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            path,
+            name,
+            RRF_RT_REG_BINARY,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&raw mut n),
+        )
     };
     r == ERROR_SUCCESS && n as usize == buf.len()
 }
@@ -618,10 +639,10 @@ struct Taskbar {
 unsafe fn taskbar() -> Option<Taskbar> {
     let hwnd = FindWindowW(w!("Shell_TrayWnd"), None).ok()?;
     let mut rect = RECT::default();
-    GetWindowRect(hwnd, &mut rect).ok()?;
+    GetWindowRect(hwnd, &raw mut rect).ok()?;
     let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
     let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-    if !GetMonitorInfoW(mon, &mut mi).as_bool() {
+    if !GetMonitorInfoW(mon, &raw mut mi).as_bool() {
         return None;
     }
     let h = rect.bottom - rect.top;
@@ -664,7 +685,7 @@ unsafe fn fullscreen_busy(taskbar: HWND) -> bool {
     }
     let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
     let mut r = RECT::default();
-    if !GetMonitorInfoW(mon, &mut mi).as_bool() || GetWindowRect(fg, &mut r).is_err() {
+    if !GetMonitorInfoW(mon, &raw mut mi).as_bool() || GetWindowRect(fg, &raw mut r).is_err() {
         return false;
     }
     let m = mi.rcMonitor;
@@ -701,6 +722,9 @@ const BAR_GAP: f32 = 2.0;
 const ART: f32 = 32.0;
 const TEXT_W: f32 = 150.0;
 
+/// Las banderas (`visible`, `want`, `blocked`, `hover`, `dirty`...) son
+/// independientes entre sí: no forman una máquina de estados.
+#[allow(clippy::struct_excessive_bools)]
 struct Widget {
     surf: Surface,
     np: NowPlaying,
@@ -727,9 +751,9 @@ struct Widget {
 }
 
 impl Widget {
-    unsafe fn new(hwnd: HWND, gfx: &Gfx) -> Self {
-        Self {
-            surf: Surface::new(hwnd, gfx),
+    unsafe fn new(hwnd: HWND, gfx: &Gfx) -> Option<Self> {
+        Some(Self {
+            surf: Surface::new(hwnd, gfx)?,
             np: NowPlaying::default(),
             title: None,
             artist: None,
@@ -750,7 +774,7 @@ impl Widget {
             dirty: true,
             relayout: true,
             flat: false,
-        }
+        })
     }
 
     fn set_track(&mut self, np: NowPlaying) {
@@ -760,7 +784,7 @@ impl Widget {
             self.relayout = true;
         }
         if np.art != self.art_url {
-            self.art_url = np.art.clone();
+            self.art_url.clone_from(&np.art);
             self.art = None;
             self.fetch_art();
         }
@@ -802,9 +826,9 @@ impl Widget {
         };
         if let Ok(bmp) = self.surf.rt.CreateBitmap(
             D2D_SIZE_U { width: size, height: size },
-            Some(px.as_ptr() as *const _),
+            Some(px.as_ptr().cast()),
             size * 4,
-            &props,
+            &raw const props,
         ) {
             self.art = Some((bmp, size));
             self.dirty = true;
@@ -858,13 +882,7 @@ impl Widget {
             self.title = gfx.layout(t, &gfx.ui, 12.5 * s, DWRITE_FONT_WEIGHT_SEMI_BOLD, TEXT_W * s);
             self.artist = gfx.layout(&self.np.artist, &gfx.ui, 12.0 * s, DWRITE_FONT_WEIGHT_NORMAL, TEXT_W * s);
         }
-        let text_w = self
-            .title
-            .iter()
-            .chain(self.artist.iter())
-            .map(text_width)
-            .fold(0.0, f32::max)
-            .min(TEXT_W * s);
+        let text_w = self.title.iter().chain(self.artist.iter()).map(text_width).fold(0.0, f32::max).min(TEXT_W * s);
         let bars_w = BANDS as f32 * (BAR_W + BAR_GAP) * s - BAR_GAP * s;
         let w = (8.0 * s + ART * s + 10.0 * s + text_w + 14.0 * s + bars_w + 12.0 * s).ceil() as i32;
         let h = tb.rect.bottom - tb.rect.top;
@@ -875,7 +893,7 @@ impl Widget {
                 .ok()
                 .and_then(|t| {
                     let mut r = RECT::default();
-                    GetWindowRect(t, &mut r).ok().map(|_| r.left)
+                    GetWindowRect(t, &raw mut r).ok().map(|()| r.left)
                 })
                 .unwrap_or(tb.rect.right - (320.0 * s) as i32);
             tray - w - (8.0 * s) as i32
@@ -977,7 +995,7 @@ impl Widget {
             }
             return false;
         }
-        if !(self.dirty || moved > 0.004 || self.alpha != old_alpha) {
+        if !(self.dirty || moved > 0.004 || (self.alpha - old_alpha).abs() > f32::EPSILON) {
             return false; // nada cambió: ni un píxel que repintar
         }
         self.dirty = false;
@@ -1014,7 +1032,7 @@ impl Widget {
                 if let Ok(brush) = rt.CreateBitmapBrush(bmp, None, None) {
                     let k = a / *size as f32;
                     brush.SetTransform(&Matrix3x2 { M11: k, M12: 0.0, M21: 0.0, M22: k, M31: ax, M32: ay });
-                    rt.FillRoundedRectangle(&art_rect, &brush);
+                    rt.FillRoundedRectangle(&raw const art_rect, &brush);
                 }
             }
             None => self.surf.fill(&art_rect, rgba(fg, 0.12)),
@@ -1040,7 +1058,7 @@ impl Widget {
             let bh = min_h + (max_h - min_h) * v;
             let x = bx + i as f32 * (bw + gap);
             // Centradas, o todas apoyadas en la misma base (la de la barra más alta).
-            let y = if self.flat { (h + max_h) / 2.0 - bh } else { (h - bh) / 2.0 };
+            let y = if self.flat { f32::midpoint(h, max_h) - bh } else { (h - bh) / 2.0 };
             let mut c = theme.accent;
             c.a = 0.55 + 0.45 * v;
             self.surf.fill(&rrect(x, y, x + bw, y + bh, bw / 2.0), c);
@@ -1052,10 +1070,12 @@ impl Widget {
 // ---------------------------------------------------------------------------
 // Aviso de Bloq Mayús
 //
-// La tarjeta entra creciendo con un pequeño rebote y el candado está dibujado
-// con geometría (no es un glifo), así que el grillete puede moverse:
-// - activar:    el grillete abierto gira, baja y encaja con un "clic".
-// - desactivar: el grillete sube, gira hacia fuera y el candado se balancea.
+// La tarjeta entra creciendo con un pequeño rebote. El candado va a juego con
+// los iconos del menú: solo líneas rectas, cuerpo hueco y grillete cuadrado,
+// dibujados con geometría para que el grillete se mueva. Solo sube y baja:
+// - activar:    el grillete baja, encaja con un "clic" y el cuerpo toma el acento.
+// - desactivar: el grillete sube con un pequeño rebote y el cuerpo lo pierde.
+// El texto y el grillete no cambian de color; la pastilla de abajo sí.
 // Solo se redibuja mientras algo se mueve; en la pausa el hilo duerme.
 
 const OSD_POP: f32 = 0.34; // entrada de la tarjeta
@@ -1065,14 +1085,20 @@ const OSD_HOLD: f32 = 1.1; // quieto en pantalla
 const OSD_OUT: f32 = 0.22; // salida
 const OSD_SHOWN: f32 = OSD_LOCK_DELAY + OSD_LOCK + OSD_HOLD;
 
-/// Grillete abierto: cuánto sube (unidades del candado) y cuánto gira (grados).
-const SHACKLE_LIFT: f32 = 1.7;
-const SHACKLE_ANGLE: f32 = -32.0;
-/// Pie izquierdo del grillete: el eje sobre el que gira al abrirse.
-const SHACKLE_X: f32 = 3.3;
-const SHACKLE_FOOT: f32 = 2.5;
+// Candado en unidades propias (caja de ~16 × 16, origen en el centro).
+/// Grosor de todas las líneas del candado.
+const LOCK_STROKE: f32 = 1.6;
+/// Borde exterior del cuerpo: (izquierda, arriba, derecha, abajo).
+const BODY: (f32, f32, f32, f32) = (-6.0, -1.0, 6.0, 7.0);
+/// Patas del grillete (eje de cada línea) y alto del arco cuadrado.
+const SHACKLE_X: f32 = 3.4;
+const SHACKLE_H: f32 = 4.6;
+/// Las patas acaban justo en el borde de arriba del cuerpo.
+const SHACKLE_FOOT: f32 = BODY.1;
+/// Cuánto sube el grillete al abrirse.
+const SHACKLE_LIFT: f32 = 2.2;
 
-/// Solo en desarrollo: MUSICRG_OSD_SLOW=10 reproduce la animación 10 veces
+/// Solo en desarrollo: `MUSICRG_OSD_SLOW=10` reproduce la animación 10 veces
 /// más lenta para poder verla fotograma a fotograma.
 #[cfg(debug_assertions)]
 fn osd_slow() -> f32 {
@@ -1095,9 +1121,6 @@ fn ease_out(x: f32) -> f32 {
 fn ease_in(x: f32) -> f32 {
     x * x * x
 }
-fn ease_in_out(x: f32) -> f32 {
-    if x < 0.5 { 4.0 * x * x * x } else { 1.0 - (-2.0 * x + 2.0).powi(3) / 2.0 }
-}
 /// Se pasa un poco y vuelve: da la sensación de "pop".
 fn ease_out_back(x: f32) -> f32 {
     let (c1, c3) = (1.70158, 2.70158);
@@ -1114,10 +1137,8 @@ fn mix(a: D2D1_COLOR_F, b: D2D1_COLOR_F, k: f32) -> D2D1_COLOR_F {
 
 /// Postura del candado en un instante.
 struct LockPose {
+    /// Cuánto ha subido el grillete (0 = cerrado).
     lift: f32,
-    angle: f32,
-    /// Balanceo de todo el candado (grados) al abrirse.
-    wiggle: f32,
     /// "Clic" al cerrarse: el candado crece un poco y vuelve.
     bump: f32,
     /// 0 = color normal, 1 = color de acento (cerrado / activado).
@@ -1127,24 +1148,18 @@ struct LockPose {
 impl LockPose {
     fn at(on: bool, u: f32) -> Self {
         if on {
-            // Cerrar: gira de vuelta, baja y encaja.
-            let swing = ease_in_out(clamp01(u / 0.45));
-            let drop = ease_in(clamp01((u - 0.4) / 0.25));
-            let click = clamp01((u - 0.62) / 0.38);
+            // Cerrar: baja acelerando y, al tocar el cuerpo, "clic".
+            let drop = ease_in(clamp01(u / 0.4));
+            let click = clamp01((u - 0.4) / 0.4);
             Self {
-                angle: SHACKLE_ANGLE * (1.0 - swing),
                 lift: SHACKLE_LIFT * (1.0 - drop),
-                wiggle: 0.0,
-                bump: 0.16 * (std::f32::consts::PI * click).sin(),
+                bump: 0.12 * (std::f32::consts::PI * click).sin(),
                 accent: ease_out(click),
             }
         } else {
-            // Abrir: sube, gira hacia fuera con rebote y se balancea.
-            let w = clamp01((u - 0.5) / 0.5);
+            // Abrir: sube con un pequeño rebote.
             Self {
-                lift: SHACKLE_LIFT * ease_out(clamp01(u / 0.3)),
-                angle: SHACKLE_ANGLE * ease_out_back(clamp01((u - 0.18) / 0.5)),
-                wiggle: 9.0 * (w * std::f32::consts::TAU).sin() * (1.0 - w),
+                lift: SHACKLE_LIFT * ease_out_back(clamp01(u / 0.55)),
                 bump: 0.0,
                 accent: 1.0 - ease_out(clamp01(u / 0.3)),
             }
@@ -1169,13 +1184,14 @@ struct Osd {
     bg: D2D1_COLOR_F,
     accent: D2D1_COLOR_F,
     shackle: Option<ID2D1PathGeometry>,
-    round: Option<ID2D1StrokeStyle>,
+    /// Puntas planas y esquinas en inglete: líneas rectas como los iconos.
+    square: Option<ID2D1StrokeStyle>,
 }
 
 impl Osd {
-    unsafe fn new(hwnd: HWND, gfx: &Gfx) -> Self {
-        Self {
-            surf: Surface::new(hwnd, gfx),
+    unsafe fn new(hwnd: HWND, gfx: &Gfx) -> Option<Self> {
+        Some(Self {
+            surf: Surface::new(hwnd, gfx)?,
             start: None,
             pos: (0, 0),
             alpha: 0.0,
@@ -1185,18 +1201,18 @@ impl Osd {
             margin: 0.0,
             card: (0.0, 0.0),
             text: None,
-            fg: 0xffffff,
-            bg: rgba(0x202020, 0.96),
-            accent: rgba(0xffffff, 1.0),
+            fg: 0x00ff_ffff,
+            bg: rgba(0x0020_2020, 0.96),
+            accent: rgba(0x00ff_ffff, 1.0),
             shackle: shackle_geometry(gfx),
-            round: gfx
+            square: gfx
                 .d2d
                 .CreateStrokeStyle(
                     &D2D1_STROKE_STYLE_PROPERTIES {
-                        startCap: D2D1_CAP_STYLE_ROUND,
-                        endCap: D2D1_CAP_STYLE_ROUND,
-                        dashCap: D2D1_CAP_STYLE_ROUND,
-                        lineJoin: D2D1_LINE_JOIN_ROUND,
+                        startCap: D2D1_CAP_STYLE_FLAT,
+                        endCap: D2D1_CAP_STYLE_FLAT,
+                        dashCap: D2D1_CAP_STYLE_FLAT,
+                        lineJoin: D2D1_LINE_JOIN_MITER,
                         miterLimit: 10.0,
                         dashStyle: D2D1_DASH_STYLE_SOLID,
                         dashOffset: 0.0,
@@ -1204,17 +1220,21 @@ impl Osd {
                     None,
                 )
                 .ok(),
-        }
+        })
     }
 
     unsafe fn show(&mut self, gfx: &Gfx, theme: &Theme, on: bool) {
-        let (s, work) = match taskbar() {
-            Some(tb) => (tb.scale, tb.work),
-            None => {
-                let mut r = RECT::default();
-                let _ = SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(&mut r as *mut _ as *mut _), Default::default());
-                (1.0, r)
-            }
+        let (s, work) = if let Some(tb) = taskbar() {
+            (tb.scale, tb.work)
+        } else {
+            let mut r = RECT::default();
+            let _ = SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                Some((&raw mut r).cast()),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS::default(),
+            );
+            (1.0, r)
         };
         let label = if on { "Caps Lock on" } else { "Caps Lock off" };
         let Some(text) = gfx.layout(label, &gfx.ui, 13.0 * s, DWRITE_FONT_WEIGHT_NORMAL, 400.0 * s) else {
@@ -1233,15 +1253,12 @@ impl Osd {
         self.card = (card_w.ceil(), card_h);
         self.text = Some(text);
         self.fg = theme.fg();
-        self.bg = if theme.light { rgba(0xf3f3f3, 0.97) } else { rgba(0x202020, 0.96) };
+        self.bg = if theme.light { rgba(0x00f3_f3f3, 0.97) } else { rgba(0x0020_2020, 0.96) };
         self.accent = theme.accent;
         self.on = on;
         // Si ya estaba en pantalla no vuelve a entrar: solo da un pequeño salto.
         self.pop = !(self.start.is_some() && self.alpha > 0.5);
-        self.pos = (
-            (work.left + work.right) / 2 - w / 2,
-            work.bottom - h + margin as i32 - (16.0 * s) as i32,
-        );
+        self.pos = (i32::midpoint(work.left, work.right) - w / 2, work.bottom - h + margin as i32 - (16.0 * s) as i32);
         self.start = Some(Instant::now());
         self.alpha = -1.0; // fuerza el primer present
         let _ = SetWindowPos(self.surf.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -1280,11 +1297,8 @@ impl Osd {
 
         // Entre el final de la animación y la salida no cambia nada: a dormir.
         let still_from = OSD_LOCK_DELAY + OSD_LOCK;
-        let next = if t >= still_from && t < OSD_SHOWN {
-            (((OSD_SHOWN - t) * osd_slow() * 1000.0) as u32).max(1)
-        } else {
-            16
-        };
+        let next =
+            if t >= still_from && t < OSD_SHOWN { (((OSD_SHOWN - t) * osd_slow() * 1000.0) as u32).max(1) } else { 16 };
         SetTimer(Some(self.surf.hwnd), T_OSD, next, None);
     }
 
@@ -1301,12 +1315,12 @@ impl Osd {
         rt.Clear(Some(&rgba(0, 0.0)));
         let center = Vector2 { X: m + cw / 2.0, Y: m + ch / 2.0 };
         let card_tf = Matrix3x2::scale_around(scale, scale, center) * Matrix3x2::translation(0.0, rise);
-        rt.SetTransform(&card_tf);
+        rt.SetTransform(&raw const card_tf);
 
         let card = rrect(m + 0.5, m + 0.5, m + cw - 0.5, m + ch - 0.5, 8.0 * s);
         self.surf.fill(&card, self.bg);
         brush.SetColor(&rgba(fg, 0.09));
-        rt.DrawRoundedRectangle(&card, brush, 1.0, None);
+        rt.DrawRoundedRectangle(&raw const card, brush, 1.0, None);
 
         let pad = 14.0 * s;
         let cy = m + ch / 2.0 - 3.0 * s;
@@ -1320,52 +1334,86 @@ impl Osd {
 
         // Candado en unidades propias (caja de ~16 x 16), escalado a la pantalla.
         let k = s * 0.92 * (1.0 + pose.bump);
-        let lock_tf = Matrix3x2::scale(k, k)
-            * Matrix3x2::rotation(pose.wiggle)
-            * Matrix3x2::translation(m + pad + 8.0 * s, cy - 0.6 * s)
-            * card_tf;
-        let color = mix(rgba(fg, 0.9), self.accent, pose.accent);
+        let lock_tf = Matrix3x2::scale(k, k) * Matrix3x2::translation(m + pad + 8.0 * s, cy) * card_tf;
+        // Grillete y bocallave siempre en blanco (o negro con tema claro); solo
+        // el cuerpo toma el acento: es lo que dice "activado".
+        let plain = rgba(fg, 0.9);
+        let body_color = mix(plain, self.accent, pose.accent);
+        brush.SetColor(&raw const plain);
+        let Some(square) = &self.square else {
+            let _ = rt.EndDraw(None, None);
+            return;
+        };
 
-        // Grillete primero: las patas quedan tapadas por el cuerpo.
-        if let (Some(shackle), Some(round)) = (&self.shackle, &self.round) {
-            let pivot = Vector2 { X: -SHACKLE_X, Y: SHACKLE_FOOT - pose.lift };
-            rt.SetTransform(
-                &(Matrix3x2::translation(0.0, -pose.lift) * Matrix3x2::rotation_around(pose.angle, pivot) * lock_tf),
-            );
-            brush.SetColor(&color);
-            rt.DrawGeometry(shackle, brush, 1.9, round);
+        // Grillete: solo se desplaza en vertical.
+        if let Some(shackle) = &self.shackle {
+            rt.SetTransform(&(Matrix3x2::translation(0.0, -pose.lift) * lock_tf));
+            rt.DrawGeometry(shackle, brush, LOCK_STROKE, square);
         }
-        rt.SetTransform(&lock_tf);
-        self.surf.fill(&rrect(-6.0, -1.0, 6.0, 7.0, 2.0), color);
-        // Bocallave hueca, del color de la tarjeta.
-        brush.SetColor(&self.bg);
-        rt.FillEllipse(
-            &D2D1_ELLIPSE { point: Vector2 { X: 0.0, Y: 2.4 }, radiusX: 1.15, radiusY: 1.15 },
-            brush,
-        );
-        rt.FillRectangle(&D2D_RECT_F { left: -0.5, top: 2.4, right: 0.5, bottom: 4.6 }, brush);
+        // Cuerpo hueco: el trazo va por dentro del borde exterior.
+        rt.SetTransform(&raw const lock_tf);
+        let h = LOCK_STROKE / 2.0;
+        let body = D2D_RECT_F { left: BODY.0 + h, top: BODY.1 + h, right: BODY.2 - h, bottom: BODY.3 - h };
+        brush.SetColor(&raw const body_color);
+        rt.DrawRectangle(&raw const body, brush, LOCK_STROKE, square);
+        // Bocallave: una raya vertical en el centro.
+        brush.SetColor(&raw const plain);
+        rt.DrawLine(Vector2 { X: 0.0, Y: 1.8 }, Vector2 { X: 0.0, Y: 4.2 }, brush, LOCK_STROKE, square);
 
         rt.SetTransform(&Matrix3x2::identity());
         let _ = rt.EndDraw(None, None);
     }
 }
 
-/// Grillete en "U" invertida: dos patas y un arco por arriba.
+/// Grillete cuadrado: dos patas rectas unidas arriba en ángulo recto.
 unsafe fn shackle_geometry(gfx: &Gfx) -> Option<ID2D1PathGeometry> {
     let geo = gfx.d2d.CreatePathGeometry().ok()?;
     let sink = geo.Open().ok()?;
-    let top = -2.4; // arco bajo: el grillete asoma poco sobre el cuerpo
+    let top = SHACKLE_FOOT - SHACKLE_H;
     sink.BeginFigure(Vector2 { X: -SHACKLE_X, Y: SHACKLE_FOOT }, D2D1_FIGURE_BEGIN_HOLLOW);
     sink.AddLine(Vector2 { X: -SHACKLE_X, Y: top });
-    sink.AddArc(&D2D1_ARC_SEGMENT {
-        point: Vector2 { X: SHACKLE_X, Y: top },
-        size: D2D_SIZE_F { width: SHACKLE_X, height: SHACKLE_X },
-        rotationAngle: 0.0,
-        sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
-        arcSize: D2D1_ARC_SIZE_SMALL,
-    });
+    sink.AddLine(Vector2 { X: SHACKLE_X, Y: top });
     sink.AddLine(Vector2 { X: SHACKLE_X, Y: SHACKLE_FOOT });
     sink.EndFigure(D2D1_FIGURE_END_OPEN);
     sink.Close().ok()?;
     Some(geo)
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::{LockPose, BODY, SHACKLE_FOOT, SHACKLE_LIFT};
+
+    #[test]
+    fn shackle_legs_meet_the_hollow_body_top() {
+        // El cuerpo es solo contorno: si las patas bajaran más, se verían dentro.
+        assert!((SHACKLE_FOOT - BODY.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn closes_seated_and_lit() {
+        let p = LockPose::at(true, 1.0);
+        assert!(p.lift.abs() < 1e-4 && (p.accent - 1.0).abs() < 1e-4 && p.bump.abs() < 1e-4);
+    }
+
+    #[test]
+    fn opens_lifted_and_plain() {
+        let p = LockPose::at(false, 1.0);
+        assert!((p.lift - SHACKLE_LIFT).abs() < 1e-4 && p.accent.abs() < 1e-4);
+    }
+
+    #[test]
+    fn starts_where_the_previous_state_ended() {
+        assert!((LockPose::at(true, 0.0).lift - SHACKLE_LIFT).abs() < 1e-4);
+        assert!(LockPose::at(false, 0.0).lift.abs() < 1e-4);
+    }
+
+    #[test]
+    fn shackle_never_sinks_into_the_body() {
+        for on in [true, false] {
+            for i in 0..=200 {
+                let lift = LockPose::at(on, i as f32 / 200.0).lift;
+                assert!((0.0..=SHACKLE_LIFT * 1.25).contains(&lift), "on={on} u={i}/200 lift={lift}");
+            }
+        }
+    }
 }

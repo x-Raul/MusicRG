@@ -114,7 +114,13 @@ Funciona aunque MusicRG esté en la bandeja, mientras la app esté abierta.
 
 ### Activar y desactivar
 
-Clic derecho en el icono de la bandeja → **Taskbar widget** / **Show other apps in widget** / **Caps Lock toast**. Se guarda en `settings.json` y se recuerda al volver a abrir.
+Clic derecho en el icono de la bandeja → submenú **Widget** (**Taskbar widget**, **Show other apps in widget**, **Flat audio bars**) y, debajo, **Caps Lock toast**. Se guarda en `settings.json` y se recuerda al volver a abrir.
+
+### Menú de la bandeja
+
+Arriba muestra lo que suena (lo mismo que el widget, recortado para que el menú no se ensanche). Luego vienen los controles, **Pinned**, el submenú **Widget**, las opciones con casilla y, al final, actualizar, mostrar y salir. **Keep PC awake** impide que el PC se suspenda y que se apague la pantalla mientras esté marcada.
+
+Los iconos son SVG propios de 16 px en `src-tauri/icons/menu/`. Al compilar, `build.rs` los pasa a imagen en dos tintas (menú claro y oscuro), así que la app no decodifica nada al ejecutarse.
 
 ### Privacidad
 
@@ -239,19 +245,24 @@ MusicRG/
 └─ src-tauri/
    ├─ Cargo.toml             # Dependencias Rust y perfil release optimizado
    ├─ Cargo.lock
-   ├─ build.rs               # tauri-build
+   ├─ build.rs               # tauri-build + iconos del menú a 16 px
    ├─ tauri.conf.json        # Nombre, versión, identificador, bundle NSIS, WebView2, updater
    ├─ tauri.updater.json     # Lo añade el CI para generar el .sig del actualizador
    ├─ icons/
    │  ├─ icon.ico            # Icono de la app y de la bandeja
-   │  └─ icon.svg            # Fuente del icono
+   │  ├─ icon.svg            # Fuente del icono
+   │  └─ menu/*.svg          # Iconos del menú de la bandeja (16 px)
    ├─ inject/
    │  ├─ theme.css           # Tema que se inyecta en music.apple.com
    │  └─ shell.js            # Script de página: CSS, modo reposo, controles
    ├─ capabilities/
    │  └─ apple-music.json    # music.apple.com solo puede llamar a now_playing
    └─ src/
-      ├─ main.rs             # Ventana, bandeja, menú, comando now_playing
+      ├─ main.rs             # Ventana del reproductor y comandos de la página
+      ├─ tray.rs             # Menú de la bandeja y su cabecera
+      ├─ menu_icons.rs       # Iconos del menú (rasterizados por build.rs)
+      ├─ awake.rs            # Keep PC awake (petición de energía de Windows)
+      ├─ lock.rs             # Mutex sin unwrap()
       ├─ overlay.rs          # Widget de la barra de tareas y aviso de Bloq Mayús
       ├─ audio.rs            # Captura de audio (MusicRG u otras apps) + FFT → niveles
       ├─ media.rs            # Lo que suena en otras apps (controles multimedia de Windows)
@@ -273,6 +284,7 @@ No hay frontend propio. La interfaz es la web de Apple Music y el proyecto solo 
 | `webview2-com` | `ICoreWebView2_19` para el nivel de memoria y `BrowserProcessId` para la captura de audio. |
 | `windows` / `windows-core` | Win32: ventanas del widget, Direct2D, DirectWrite, WIC, URLMon, WASAPI, Raw Input, registro. WinRT: controles multimedia de Windows (`Media.Control`). |
 | `windows-numerics` | Tipos de vector/matriz que usa Direct2D. |
+| `resvg` (solo al compilar) | Pasa los SVG del menú a imagen en `build.rs`; no entra en el ejecutable. |
 
 Aparte del actualizador (que trae su propio cliente HTTP), no hay crates de HTTP, imagen, audio ni FFT: todo eso lo hace Windows o unas pocas líneas propias.
 
@@ -362,13 +374,31 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
+### Instalador firmado en local
+
+Para tener el instalador sin pasar por GitHub, [`scripts/publish.ps1`](scripts/publish.ps1) hace lo mismo que el workflow con una etiqueta, pero en tu PC y sin publicar nada:
+
+1. Comprueba que la versión de `tauri.conf.json` y `Cargo.toml` coincide y que `%USERPROFILE%\.tauri\musicrg.key` es la clave de `tauri.conf.json`.
+2. Compila con la firma del actualizador.
+3. Deja en `publish\v<versión>\` (ignorada por git) el instalador, su `.sig` y `latest.json`, listos para subir a un release `v<versión>`.
+
+Necesita la CLI de Tauri desde crates.io (una sola vez):
+
+```powershell
+cargo install tauri-cli --version "^2" --locked
+```
+
+```powershell
+powershell -File scripts/publish.ps1
+```
+
 ## Datos que guarda en tu PC
 
 | Ruta | Contenido |
 | --- | --- |
 | `%LOCALAPPDATA%\com.xraul.musicrg\` | Perfil de WebView2: cookies, sesión de Apple ID, caché. |
 | `%APPDATA%\MusicRG\theme.css` | Tu tema personalizado (solo si lo creas). |
-| `%APPDATA%\MusicRG\settings.json` | Widget y aviso de Bloq Mayús activados o no, y `widget_offset` si lo pones. |
+| `%APPDATA%\MusicRG\settings.json` | Opciones de la bandeja (widget, aviso de Bloq Mayús, Keep PC awake...), la última lista de Pinned y `widget_offset` si lo pones. |
 
 Para **cerrar sesión del todo** o empezar de cero: sal de MusicRG desde la bandeja y borra `%LOCALAPPDATA%\com.xraul.musicrg\`. Desinstalar la app no borra estas carpetas.
 

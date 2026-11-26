@@ -27,8 +27,18 @@ mod imp {
     pub fn enabled() -> bool {
         let mut buf = [0u16; 1024];
         let mut n = (buf.len() * 2) as u32;
+        // SAFETY: `buf` vive durante toda la llamada y `n` dice su tamaño real
+        // en bytes; Windows no escribe más allá.
         let r = unsafe {
-            RegGetValueW(HKEY_CURRENT_USER, RUN, NAME, RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr() as *mut _), Some(&mut n))
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                RUN,
+                NAME,
+                RRF_RT_REG_SZ,
+                None,
+                Some(buf.as_mut_ptr().cast()),
+                Some(&raw mut n),
+            )
         };
         if r != ERROR_SUCCESS {
             return false;
@@ -39,15 +49,19 @@ mod imp {
     }
 
     pub fn set(on: bool) {
-        unsafe {
-            if on {
-                let Some(cmd) = command() else { return };
-                let wide = HSTRING::from(cmd);
-                let bytes = (wide.len() + 1) * 2;
-                let _ = RegSetKeyValueW(HKEY_CURRENT_USER, RUN, NAME, REG_SZ.0, Some(wide.as_ptr() as *const _), bytes as u32);
-            } else {
-                let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN, NAME);
-            }
+        if on {
+            let Some(cmd) = command() else { return };
+            let wide = HSTRING::from(cmd);
+            // Con el 0 final, que `HSTRING` siempre guarda tras el texto.
+            let bytes = (wide.len() + 1) * 2;
+            // SAFETY: `wide` vive durante la llamada y tiene `bytes` bytes
+            // legibles (texto + terminador).
+            let _ = unsafe {
+                RegSetKeyValueW(HKEY_CURRENT_USER, RUN, NAME, REG_SZ.0, Some(wide.as_ptr().cast()), bytes as u32)
+            };
+        } else {
+            // SAFETY: solo constantes de texto estáticas.
+            let _ = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN, NAME) };
         }
     }
 }

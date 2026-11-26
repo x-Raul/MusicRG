@@ -3,7 +3,7 @@
 //!
 //! Todo por eventos: Windows avisa cuando cambia una sesión, su canción o su
 //! estado (play/pausa) y entonces se vuelve a mirar. Sin sondeo. La sesión de
-//! la propia MusicRG se ignora: esa ya la cuenta la página (shell.js).
+//! la propia MusicRG se ignora: esa ya la cuenta la página (`shell.js`).
 
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::sync::Mutex;
@@ -11,23 +11,23 @@ use std::time::Duration;
 
 use windows::Foundation::TypedEventHandler;
 use windows::Media::Control::{
-    GlobalSystemMediaTransportControlsSession as Session,
-    GlobalSystemMediaTransportControlsSessionManager as Manager,
+    GlobalSystemMediaTransportControlsSession as Session, GlobalSystemMediaTransportControlsSessionManager as Manager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
 };
 use windows::Storage::Streams::DataReader;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
+use crate::lock::lock;
 use crate::overlay::NowPlaying;
 
 /// Carátula de la canción actual: (clave, bytes de la imagen tal cual).
-/// El widget la decodifica al tamaño que necesita (art::decode_bytes).
+/// El widget la decodifica al tamaño que necesita (`art::decode_bytes`).
 static THUMB: Mutex<Option<(String, Vec<u8>)>> = Mutex::new(None);
 /// Las claves de carátula de este módulo empiezan así (en vez de "https://").
 pub const ART_PREFIX: &str = "media:";
 
 pub fn thumbnail(key: &str) -> Option<Vec<u8>> {
-    match &*THUMB.lock().unwrap() {
+    match &*lock(&THUMB) {
         Some((k, bytes)) if k == key => Some(bytes.clone()),
         _ => None,
     }
@@ -35,8 +35,9 @@ pub fn thumbnail(key: &str) -> Option<Vec<u8>> {
 
 /// Lanza el hilo. `report` recibe cada cambio de lo que suena fuera de MusicRG.
 pub fn spawn(report: impl Fn(NowPlaying) + Send + 'static) {
-    let _ = std::thread::Builder::new().name("rg-media".into()).spawn(move || unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    let _ = std::thread::Builder::new().name("rg-media".into()).spawn(move || {
+        // SAFETY: hilo nuevo y propio; COM queda iniciado para toda su vida.
+        let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         if let Err(e) = run(&report) {
             log(&format!("media: {e}"));
         }
@@ -129,11 +130,7 @@ fn is_own(session: &Session) -> bool {
 }
 
 fn is_playing(session: &Session) -> bool {
-    session
-        .GetPlaybackInfo()
-        .and_then(|i| i.PlaybackStatus())
-        .map(|s| s == Status::Playing)
-        .unwrap_or(false)
+    session.GetPlaybackInfo().and_then(|i| i.PlaybackStatus()).is_ok_and(|s| s == Status::Playing)
 }
 
 /// La sesión que manda: la "actual" de Windows si está sonando; si no, la
@@ -158,10 +155,10 @@ fn evaluate(mgr: &Manager) -> windows::core::Result<NowPlaying> {
         return Ok(NowPlaying::default());
     };
     let props = session.TryGetMediaPropertiesAsync()?.join()?;
-    let title = props.Title().map(|s| s.to_string()).unwrap_or_default();
-    let mut artist = props.Artist().map(|s| s.to_string()).unwrap_or_default();
+    let title = props.Title().map_or_default(|s| s.to_string());
+    let mut artist = props.Artist().map_or_default(|s| s.to_string());
     if artist.is_empty() {
-        artist = props.AlbumArtist().map(|s| s.to_string()).unwrap_or_default();
+        artist = props.AlbumArtist().map_or_default(|s| s.to_string());
     }
     if title.is_empty() {
         return Ok(NowPlaying::default());
@@ -173,13 +170,13 @@ fn evaluate(mgr: &Manager) -> windows::core::Result<NowPlaying> {
     } else {
         match props.Thumbnail().ok().and_then(|t| read_all(&t.OpenReadAsync().ok()?.join().ok()?)) {
             Some(bytes) => {
-                *THUMB.lock().unwrap() = Some((key.clone(), bytes));
+                *lock(&THUMB) = Some((key.clone(), bytes));
                 key
             }
             None => String::new(),
         }
     };
-    Ok(NowPlaying { playing: true, title: clip(title), artist: clip(artist), art })
+    Ok(NowPlaying { playing: true, title: clip(&title), artist: clip(&artist), art })
 }
 
 fn read_all(stream: &windows::Storage::Streams::IRandomAccessStreamWithContentType) -> Option<Vec<u8>> {
@@ -194,7 +191,6 @@ fn read_all(stream: &windows::Storage::Streams::IRandomAccessStreamWithContentTy
     Some(buf)
 }
 
-fn clip(s: String) -> String {
+fn clip(s: &str) -> String {
     s.chars().take(300).collect()
 }
-
