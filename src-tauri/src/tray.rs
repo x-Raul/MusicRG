@@ -17,7 +17,7 @@ use crate::lock::lock;
 use crate::menu_icons::{dark_menu, image, Icon};
 use crate::overlay::{NowPlaying, Overlay};
 use crate::settings::{self, Settings};
-use crate::{autostart, awake, show, updater};
+use crate::{autostart, awake, screen, show, updater};
 
 /// Máximo de caracteres de la cabecera, contando la elipsis: no más ancha
 /// que "Show other apps in widget", para que el menú no se ensanche.
@@ -214,6 +214,7 @@ struct Toggles {
     flat: CheckMenuItem<Wry>,
     caps: CheckMenuItem<Wry>,
     keep_awake: CheckMenuItem<Wry>,
+    screen_care: CheckMenuItem<Wry>,
 }
 
 impl Toggles {
@@ -225,6 +226,11 @@ impl Toggles {
             flat: check("flat", "Flat audio bars", prefs.flat)?,
             caps: check("caps", "Caps Lock toast", prefs.caps)?,
             keep_awake: check("keep_awake", "Keep PC awake", prefs.keep_awake)?,
+            screen_care: check(
+                "screen_care",
+                &format!("Screen care ({} min)", settings::screen_off_minutes()),
+                prefs.screen_care,
+            )?,
         })
     }
 
@@ -238,6 +244,7 @@ impl Toggles {
             others: on(&self.others, d.others),
             flat: on(&self.flat, d.flat),
             keep_awake: on(&self.keep_awake, d.keep_awake),
+            screen_care: on(&self.screen_care, d.screen_care),
         }
     }
 }
@@ -251,6 +258,7 @@ fn apply_settings(app: &AppHandle, prefs: Settings, config_dir: Option<&Path>) {
     app.state::<Header>().set_others(prefs.others);
     overlay.set_flat(prefs.flat);
     awake::set(prefs.keep_awake);
+    screen::set(prefs.screen_care, settings::screen_off_minutes());
     if let Some(dir) = config_dir {
         settings::save(dir, prefs);
     }
@@ -296,6 +304,7 @@ pub fn build(app: &App, prefs: Settings, config_dir: Option<PathBuf>) -> Result<
             &widget_menu,
             &toggles.caps,
             &toggles.keep_awake,
+            &toggles.screen_care,
             &autostart_item,
             &PredefinedMenuItem::separator(app)?,
             &update_item,
@@ -336,7 +345,7 @@ pub fn build(app: &App, prefs: Settings, config_dir: Option<PathBuf>) -> Result<
                     play_pin(app, i);
                 }
             }
-            "widget" | "caps" | "others" | "flat" | "keep_awake" => {
+            "widget" | "caps" | "others" | "flat" | "keep_awake" | "screen_care" => {
                 apply_settings(app, toggles.read(), config_dir.as_deref());
             }
             cmd @ ("toggle" | "next" | "prev") => {
