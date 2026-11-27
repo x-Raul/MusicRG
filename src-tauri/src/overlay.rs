@@ -696,6 +696,15 @@ unsafe fn fullscreen_busy(taskbar: HWND) -> bool {
     covers && !above(taskbar, fg)
 }
 
+/// ¿Hay un juego (o algo) a pantalla completa en el monitor de la barra de
+/// tareas? Para el modo Auto del timer. Solo consulta Win32: vale desde
+/// cualquier hilo.
+pub fn game_running() -> bool {
+    // SAFETY: consultas de solo lectura sobre ventanas; si alguna ya no
+    // existe, la llamada falla y cuenta como "no".
+    unsafe { taskbar().is_some_and(|tb| fullscreen_busy(tb.hwnd)) }
+}
+
 /// ¿`a` está por encima de `b` en el orden Z?
 unsafe fn above(a: HWND, b: HWND) -> bool {
     let mut cur = b;

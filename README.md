@@ -123,7 +123,21 @@ Arriba muestra lo que suena (lo mismo que el widget, recortado para que el menú
 
 **Always on top** deja la ventana por encima de las demás; es lo mismo que la chincheta junto a minimizar. Si la maximizas se suspende, y vuelve al restaurarla. Ojo: con la opción activa también tapa juegos en «ventana sin bordes».
 
-**Screen care** cuida pantallas OLED/LED: si pasas 10 minutos sin tocar ratón ni teclado, apaga la pantalla (como el botón del monitor). La música sigue sonando y se enciende otra vez al mover el ratón o pulsar una tecla. No la apaga si hay algo a pantalla completa (vídeo, juego, presentación). Funciona también con **Keep PC awake** marcado: así el PC no se suspende pero la pantalla descansa. Los minutos se cambian a mano en `%APPDATA%\MusicRG\settings.json` con `"screen_off_minutes"` (de 1 a 240) y reiniciando MusicRG.
+**Screen care** cuida pantallas OLED/LED: si pasas 10 minutos sin tocar ratón ni teclado, apaga la pantalla (como el botón del monitor). La música sigue sonando y se enciende otra vez al mover el ratón o pulsar una tecla. No la apaga si hay algo a pantalla completa (vídeo, juego, presentación). Funciona también con **Keep PC awake** marcado: así el PC no se suspende pero la pantalla descansa. Se activa y se eligen los minutos (5, 10, 15, 30 o 60) en **Settings → Advanced settings → System → Screen care**; se aplica al momento. También se puede poner otro valor a mano en `%APPDATA%\MusicRG\settings.json` con `"screen_off_minutes"` (de 1 a 240).
+
+### Ventana de ajustes
+
+Clic derecho en la bandeja → **Settings…**. Arriba está lo principal, **Performance**. El resto (servicio de música, widget y sistema) va plegado en **Advanced settings**, y la ruta del archivo de ajustes en **Where settings are saved**: un clic los despliega y la ventana crece. Lo que cambies ahí se refleja en el menú de la bandeja, y al revés. Es una ventana nativa (Win32 + Direct2D por software, sin otro WebView): no existe hasta que la abres y, al cerrarla, se destruye con su hilo y la memoria vuelve a la de antes.
+
+En **Performance** hay un dial con la resolución del temporizador de Windows que hay ahora mismo (escala en octavas, de 16 ms a 0,5 ms), con la mínima y la máxima que admite el equipo:
+
+- **Timer resolution 0.5 ms** pide a Windows el intervalo más fino (lo mismo que el botón *Maximum* de herramientas como *Set Timer Resolution*). Tiene tres modos: **Off** (lo que decida Windows), **Auto** (solo mientras hay un juego o algo a pantalla completa; lo mira cada 2 s con la misma comprobación que esconde el widget) y **Always**. MusicRG lo pide aunque esté solo en la bandeja, y Windows lo suelta al cerrar la app. Gasta algo más de energía.
+- **Free memory when idle** (activado por defecto): con la ventana del reproductor cerrada y nada sonando durante 30 minutos, MusicRG destruye el WebView2 entero, que son unos 100 MB y varios procesos. Al abrirlo desde la bandeja se vuelve a cargar en unos segundos. Si algo suena (en MusicRG o en otra app), no se descarga.
+- **Apply to games** escribe `GlobalTimerResolutionRequests = 1` en `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\kernel` (pide permiso de administrador). Desde Windows 10 2004 la resolución es por proceso: sin este valor, los 0,5 ms solo valen para MusicRG y no para los juegos. Con él, la petición vale para todo el sistema. Necesita reiniciar Windows, y la ventana avisa mientras tanto. Desactivarlo deja el valor a 0.
+
+En **Advanced settings → Player** se elige qué abre el reproductor: **Apple** (Apple Music, por defecto), **Spotify**, **YT Music**, **Custom** (cualquier dirección `https://`, que se escribe en el campo que aparece y se aplica con Enter) u **Off**. Con Off no hay reproductor ni ningún proceso de navegador; quedan el widget, el aviso de Bloq Mayús y la bandeja, y **Show MusicRG** abre los ajustes. Al cambiar de servicio, el reproductor se recarga.
+
+El tema, `shell.js` (barra propia, Pinned, controles de la bandeja) y el aviso de lo que suena desde la página son solo para Apple Music. Las demás webs se abren tal cual, con la barra de título de Windows y sin ningún script de MusicRG. Su canción se lee de los controles multimedia de Windows, así que el widget y la cabecera del menú la siguen mostrando.
 
 Los iconos son SVG propios de 16 px en `src-tauri/icons/menu/`. Al compilar, `build.rs` los pasa a imagen en dos tintas (menú claro y oscuro), así que la app no decodifica nada al ejecutarse.
 
@@ -269,6 +283,9 @@ MusicRG/
       ├─ awake.rs            # Keep PC awake (petición de energía de Windows)
       ├─ on_top.rs           # Always on top (chincheta y casilla de la bandeja)
       ├─ screen.rs           # Screen care (apaga la pantalla tras N min sin actividad)
+      ├─ timer.rs            # Timer resolution 0,5 ms y modo global (registro)
+      ├─ panel.rs            # Ventana de ajustes nativa (Direct2D)
+      ├─ player.rs           # Qué web abre el reproductor y descargarlo si no se usa
       ├─ lock.rs             # Mutex sin unwrap()
       ├─ overlay.rs          # Widget de la barra de tareas y aviso de Bloq Mayús
       ├─ audio.rs            # Captura de audio (MusicRG u otras apps) + FFT → niveles

@@ -9,8 +9,11 @@ mod media;
 mod menu_icons;
 mod on_top;
 mod overlay;
+mod panel;
+mod player;
 mod screen;
 mod settings;
+mod timer;
 mod tray;
 mod updater;
 
@@ -20,7 +23,6 @@ use settings::Settings;
 use tauri::{AppHandle, Manager, Theme, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use tray::{fill_pins, Header, Pins};
 
-const URL: &str = "https://music.apple.com/";
 const THEME_CSS: &str = include_str!("../inject/theme.css");
 const SHELL_JS: &str = include_str!("../inject/shell.js");
 
@@ -74,6 +76,7 @@ fn now_playing(
     let clip = |s: &str| s.chars().take(300).collect::<String>();
     let np = NowPlaying { playing, title: clip(&title), artist: clip(&artist), art: clip(&art) };
     app.state::<Header>().set_own(&np);
+    player::set_own_playing(playing);
     overlay.now_playing(np);
 }
 
@@ -125,8 +128,11 @@ fn main() {
     // Solo en desarrollo: MUSICRG_OSD_DEMO=1 alterna el aviso de Bloq Mayús
     // cada pocos segundos y deja convivir con la MusicRG instalada.
     let osd_demo = cfg!(debug_assertions) && std::env::var_os("MUSICRG_OSD_DEMO").is_some();
+    // Solo en desarrollo: MUSICRG_SETTINGS_DEMO=1 abre la ventana de ajustes
+    // al arrancar, sin reproductor y conviviendo con la MusicRG instalada.
+    let settings_demo = cfg!(debug_assertions) && std::env::var_os("MUSICRG_SETTINGS_DEMO").is_some();
     let mut builder = tauri::Builder::default();
-    if !osd_demo {
+    if !osd_demo && !settings_demo {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)));
     }
     let result = builder
@@ -142,15 +148,34 @@ fn main() {
             awake::set(prefs.keep_awake);
             on_top::init(prefs.on_top);
             screen::set(prefs.screen_care, settings::screen_off_minutes());
+            timer::set_mode(prefs.timer);
+            // Los ajustes vigentes existen antes que el reproductor (que lee
+            // de ellos qué web abrir) y que el menú.
+            app.manage(tray::Prefs::new(prefs, config_dir.clone()));
+            player::init(app.handle(), prefs.free_idle);
             // La cabecera del menú existe desde ya: lo que suene antes de que
             // se monte el menú queda guardado y se muestra al montarlo.
             app.manage(Header::new(prefs.others));
             // Lo que suena en otras apps (navegador, Spotify...) para el widget
             // y para la cabecera del menú.
             let handle = app.handle().clone();
-            media::spawn(move |np| {
-                handle.state::<Header>().set_ext(&np);
-                overlay::external(np);
+            media::spawn(move |np, own| {
+                if media::OWN_FROM_PAGE.load(std::sync::atomic::Ordering::Relaxed) {
+                    player::set_ext_playing(np.playing);
+                    handle.state::<Header>().set_ext(&np);
+                    overlay::external(np);
+                    return;
+                }
+                // Spotify, YouTube Music...: la página no cuenta nada; su
+                // sesión multimedia hace de "lo que suena en MusicRG".
+                let (mine, other) = if own { (np, NowPlaying::default()) } else { (NowPlaying::default(), np) };
+                player::set_own_playing(mine.playing);
+                player::set_ext_playing(other.playing);
+                let header = handle.state::<Header>();
+                header.set_own(&mine);
+                header.set_ext(&other);
+                handle.state::<Overlay>().now_playing(mine);
+                overlay::external(other);
             });
             #[cfg(debug_assertions)]
             dev_demos(app.handle(), osd_demo);
@@ -158,10 +183,19 @@ fn main() {
             // Arrancada por Windows al iniciar sesión: solo widget, aviso de
             // Bloq Mayús y bandeja. El reproductor (WebView2, cientos de MB) no
             // se crea hasta que se pide.
-            if !autostart::launched_at_login() {
+            if !autostart::launched_at_login() && !settings_demo {
                 open_player(app.handle(), true);
             }
-            tray::build(app, prefs, config_dir)
+            tray::build(app, prefs, config_dir.as_deref())?;
+            if settings_demo {
+                tray::open_settings(app.handle());
+                // Y con MUSICRG_PLAYER_DEMO=1, el reproductor escondido (para
+                // probar "Free memory when idle" con MUSICRG_IDLE_SECS).
+                if std::env::var_os("MUSICRG_PLAYER_DEMO").is_some() {
+                    open_player(app.handle(), false);
+                }
+            }
+            Ok(())
         })
         .on_window_event(|window, event| {
             // Maximizar suspende "Always on top"; restaurar lo devuelve.
@@ -174,15 +208,26 @@ fn main() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
+                player::set_hidden(true);
                 if let Some(win) = window.app_handle().get_webview_window(window.label()) {
                     set_low_memory(&win, true);
                 }
             }
         })
-        .run(tauri::generate_context!());
-    if let Err(e) = result {
-        eprintln!("[musicrg] failed to start MusicRG: {e}");
-        std::process::exit(1);
+        .build(tauri::generate_context!());
+    match result {
+        Ok(app) => app.run(|_, event| {
+            // Descargar el reproductor (o tenerlo apagado) deja la app sin
+            // ventanas de Tauri, y eso no es salir: MusicRG sigue en la
+            // bandeja. Solo sale con "Quit" (`exit(0)` trae código).
+            if let tauri::RunEvent::ExitRequested { api, code: None, .. } = event {
+                api.prevent_exit();
+            }
+        }),
+        Err(e) => {
+            eprintln!("[musicrg] failed to start MusicRG: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -214,9 +259,15 @@ fn dev_demos(app: &AppHandle, osd_demo: bool) {
 }
 
 fn show(app: &AppHandle) {
+    // Sin reproductor, "mostrar MusicRG" es abrir sus ajustes.
+    if player::off(app) {
+        tray::open_settings(app);
+        return;
+    }
     match app.get_webview_window("main") {
         Some(win) => {
             set_low_memory(&win, false);
+            player::set_hidden(false);
             let _ = win.unminimize();
             let _ = win.show();
             let _ = win.set_focus();
@@ -252,25 +303,34 @@ fn build_player(app: &AppHandle, visible: bool) -> Result<(), Box<dyn std::error
         }
         Err(_) => THEME_CSS.to_string(),
     };
-    let script = SHELL_JS.replace("__RG_CSS__", &serde_json::to_string(&css)?);
-    let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(URL.parse()?))
+    // Reproductor apagado (Off): ni ventana ni procesos de WebView2.
+    let Some(url) = player::url(app) else { return Ok(()) };
+    let apple = player::is_apple(&url);
+    media::OWN_FROM_PAGE.store(apple, std::sync::atomic::Ordering::Relaxed);
+    let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse()?));
+    if apple {
+        // Sin barra de título: la página ocupa toda la ventana y shell.js
+        // pone los botones de minimizar / maximizar / cerrar.
+        let script = SHELL_JS.replace("__RG_CSS__", &serde_json::to_string(&css)?);
+        builder = builder.decorations(false).initialization_script(&script);
+    }
+    // Otro servicio: su web tal cual, con la barra de título de Windows y
+    // sin ningún script nuestro (ni acceso a los comandos de la app).
+    let win = builder
         .title("MusicRG")
         .visible(visible)
         .inner_size(1180.0, 760.0)
         .min_inner_size(420.0, 320.0)
         .center()
-        // Sin barra de título: la página ocupa toda la ventana y
-        // shell.js pone los botones de minimizar / maximizar / cerrar.
-        .decorations(false)
         .shadow(true)
         .theme(Some(Theme::Dark))
         .background_color(tauri::webview::Color(BG.0, BG.1, BG.2, 255))
         .additional_browser_args(&browser_args())
-        .initialization_script(&script)
         .always_on_top(on_top::wanted())
         .build()?;
     on_top::created();
     remember_browser_pid(&win);
+    player::set_hidden(!visible);
     if visible {
         let _ = win.set_focus();
     } else {

@@ -2,9 +2,13 @@
 //! controles multimedia de Windows: la misma fuente que el panel de volumen.
 //!
 //! Todo por eventos: Windows avisa cuando cambia una sesión, su canción o su
-//! estado (play/pausa) y entonces se vuelve a mirar. Sin sondeo. La sesión de
-//! la propia MusicRG se ignora: esa ya la cuenta la página (`shell.js`).
+//! estado (play/pausa) y entonces se vuelve a mirar. Sin sondeo. Con Apple
+//! Music, la sesión de la propia MusicRG se ignora: esa ya la cuenta la
+//! página (`shell.js`). Con otro servicio (Spotify, `YouTube Music`...) la
+//! página no cuenta nada, así que su sesión se lee de aquí y se marca como
+//! propia.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -33,8 +37,12 @@ pub fn thumbnail(key: &str) -> Option<Vec<u8>> {
     }
 }
 
-/// Lanza el hilo. `report` recibe cada cambio de lo que suena fuera de MusicRG.
-pub fn spawn(report: impl Fn(NowPlaying) + Send + 'static) {
+/// ¿La página del reproductor cuenta ella misma lo que suena (Apple Music)?
+pub static OWN_FROM_PAGE: AtomicBool = AtomicBool::new(true);
+
+/// Lanza el hilo. `report` recibe cada cambio de lo que suena y si es de la
+/// propia MusicRG (solo cuando la página no lo cuenta).
+pub fn spawn(report: impl Fn(NowPlaying, bool) + Send + 'static) {
     let _ = std::thread::Builder::new().name("rg-media".into()).spawn(move || {
         // SAFETY: hilo nuevo y propio; COM queda iniciado para toda su vida.
         let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
@@ -58,7 +66,7 @@ struct Hook {
     media: i64,
 }
 
-fn run(report: &dyn Fn(NowPlaying)) -> windows::core::Result<()> {
+fn run(report: &dyn Fn(NowPlaying, bool)) -> windows::core::Result<()> {
     let mgr = Manager::RequestAsync()?.join()?;
     let (tx, rx) = channel::<bool>(); // true = cambió la lista de sesiones
 
@@ -74,7 +82,7 @@ fn run(report: &dyn Fn(NowPlaying)) -> windows::core::Result<()> {
     }))?;
 
     let mut hooks: Vec<Hook> = Vec::new();
-    let mut last = NowPlaying::default();
+    let mut last = (NowPlaying::default(), false);
     let mut rehook = true;
     loop {
         if rehook {
@@ -101,8 +109,8 @@ fn run(report: &dyn Fn(NowPlaying)) -> windows::core::Result<()> {
         }
         let now = evaluate(&mgr).unwrap_or_default();
         if now != last {
-            log(&format!("media: playing={} {:?} - {:?}", now.playing, now.title, now.artist));
-            report(now.clone());
+            log(&format!("media: playing={} own={} {:?} - {:?}", now.0.playing, now.1, now.0.title, now.0.artist));
+            report(now.0.clone(), now.1);
             last = now;
         }
         rehook = wait(&rx)?;
@@ -134,8 +142,9 @@ fn is_playing(session: &Session) -> bool {
 }
 
 /// La sesión que manda: la "actual" de Windows si está sonando; si no, la
-/// primera que esté sonando. Si no suena nada, `playing: false`.
-fn evaluate(mgr: &Manager) -> windows::core::Result<NowPlaying> {
+/// primera que esté sonando. Si no suena nada, `playing: false`. El `bool`
+/// dice si es la de MusicRG.
+fn evaluate(mgr: &Manager) -> windows::core::Result<(NowPlaying, bool)> {
     let mut candidates: Vec<Session> = Vec::new();
     if let Ok(cur) = mgr.GetCurrentSession() {
         candidates.push(cur);
@@ -151,9 +160,11 @@ fn evaluate(mgr: &Manager) -> windows::core::Result<NowPlaying> {
             is_playing(s)
         ));
     }
-    let Some(session) = candidates.into_iter().find(|s| !is_own(s) && is_playing(s)) else {
-        return Ok(NowPlaying::default());
+    let skip_own = OWN_FROM_PAGE.load(Ordering::Relaxed);
+    let Some(session) = candidates.into_iter().find(|s| !(skip_own && is_own(s)) && is_playing(s)) else {
+        return Ok((NowPlaying::default(), false));
     };
+    let own = is_own(&session);
     let props = session.TryGetMediaPropertiesAsync()?.join()?;
     let title = props.Title().map_or_default(|s| s.to_string());
     let mut artist = props.Artist().map_or_default(|s| s.to_string());
@@ -161,7 +172,7 @@ fn evaluate(mgr: &Manager) -> windows::core::Result<NowPlaying> {
         artist = props.AlbumArtist().map_or_default(|s| s.to_string());
     }
     if title.is_empty() {
-        return Ok(NowPlaying::default());
+        return Ok((NowPlaying::default(), false));
     }
     let app = session.SourceAppUserModelId().unwrap_or_default();
     let key = format!("{ART_PREFIX}{app}|{title}|{artist}");
@@ -176,7 +187,7 @@ fn evaluate(mgr: &Manager) -> windows::core::Result<NowPlaying> {
             None => String::new(),
         }
     };
-    Ok(NowPlaying { playing: true, title: clip(&title), artist: clip(&artist), art })
+    Ok((NowPlaying { playing: true, title: clip(&title), artist: clip(&artist), art }, own))
 }
 
 fn read_all(stream: &windows::Storage::Streams::IRandomAccessStreamWithContentType) -> Option<Vec<u8>> {

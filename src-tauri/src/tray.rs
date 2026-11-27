@@ -16,8 +16,10 @@ use tauri::{
 use crate::lock::lock;
 use crate::menu_icons::{dark_menu, image, Icon};
 use crate::overlay::{NowPlaying, Overlay};
+use crate::panel::{self, Change, Key};
+use crate::settings::Player;
 use crate::settings::{self, Settings};
-use crate::{autostart, awake, on_top, screen, show, updater};
+use crate::{autostart, awake, on_top, player, screen, show, timer, updater};
 
 /// Máximo de caracteres de la cabecera, contando la elipsis: no más ancha
 /// que "Show other apps in widget", para que el menú no se ensanche.
@@ -207,6 +209,11 @@ fn play_pin(app: &AppHandle, i: usize) {
     }
 }
 
+/// Texto de la casilla de "Screen care", con sus minutos.
+fn screen_label() -> String {
+    format!("Screen care ({} min)", settings::screen_off_minutes())
+}
+
 /// Casillas de ajustes del menú de la bandeja.
 struct Toggles {
     widget: CheckMenuItem<Wry>,
@@ -216,12 +223,10 @@ struct Toggles {
     keep_awake: CheckMenuItem<Wry>,
     screen_care: CheckMenuItem<Wry>,
     on_top: CheckMenuItem<Wry>,
-    /// Dónde se guardan los ajustes.
-    config_dir: Option<PathBuf>,
 }
 
 impl Toggles {
-    fn new(app: &App, prefs: Settings, config_dir: Option<PathBuf>) -> tauri::Result<Self> {
+    fn new(app: &App, prefs: Settings) -> tauri::Result<Self> {
         let check = |id: &str, text: &str, on: bool| CheckMenuItem::with_id(app, id, text, true, on, None::<&str>);
         Ok(Self {
             widget: check("widget", "Taskbar widget", prefs.widget)?,
@@ -229,34 +234,72 @@ impl Toggles {
             flat: check("flat", "Flat audio bars", prefs.flat)?,
             caps: check("caps", "Caps Lock toast", prefs.caps)?,
             keep_awake: check("keep_awake", "Keep PC awake", prefs.keep_awake)?,
-            screen_care: check(
-                "screen_care",
-                &format!("Screen care ({} min)", settings::screen_off_minutes()),
-                prefs.screen_care,
-            )?,
+            screen_care: check("screen_care", &screen_label(), prefs.screen_care)?,
             on_top: check("on_top", "Always on top", prefs.on_top)?,
-            config_dir,
         })
     }
 
-    /// Lo que marcan ahora las casillas.
-    fn read(&self) -> Settings {
-        let d = Settings::default();
+    /// Lo que marcan ahora las casillas; lo que no está en el menú (el
+    /// timer) se queda como en `base`.
+    fn read(&self, base: Settings) -> Settings {
         let on = |item: &CheckMenuItem<Wry>, default: bool| item.is_checked().unwrap_or(default);
         Settings {
-            widget: on(&self.widget, d.widget),
-            caps: on(&self.caps, d.caps),
-            others: on(&self.others, d.others),
-            flat: on(&self.flat, d.flat),
-            keep_awake: on(&self.keep_awake, d.keep_awake),
-            screen_care: on(&self.screen_care, d.screen_care),
-            on_top: on(&self.on_top, d.on_top),
+            widget: on(&self.widget, base.widget),
+            caps: on(&self.caps, base.caps),
+            others: on(&self.others, base.others),
+            flat: on(&self.flat, base.flat),
+            keep_awake: on(&self.keep_awake, base.keep_awake),
+            screen_care: on(&self.screen_care, base.screen_care),
+            on_top: on(&self.on_top, base.on_top),
+            ..base
         }
+    }
+
+    /// Pone las casillas como dicen los ajustes (tras un cambio en la ventana).
+    fn show(&self, s: Settings) {
+        for (item, on) in [
+            (&self.widget, s.widget),
+            (&self.others, s.others),
+            (&self.flat, s.flat),
+            (&self.caps, s.caps),
+            (&self.keep_awake, s.keep_awake),
+            (&self.screen_care, s.screen_care),
+            (&self.on_top, s.on_top),
+        ] {
+            let _ = item.set_checked(on);
+        }
+        let _ = self.screen_care.set_text(screen_label());
     }
 }
 
-/// Aplica los ajustes que acaban de cambiar en el menú y los guarda.
-fn apply_settings(app: &AppHandle, prefs: Settings, config_dir: Option<&Path>) {
+/// Ajustes vigentes: los comparten el menú de la bandeja y la ventana de ajustes.
+pub struct Prefs {
+    cur: Mutex<Settings>,
+    dir: Option<PathBuf>,
+}
+
+impl Prefs {
+    pub fn new(prefs: Settings, dir: Option<PathBuf>) -> Self {
+        Self { cur: Mutex::new(prefs), dir }
+    }
+}
+
+/// Los ajustes vigentes.
+pub fn current(app: &AppHandle) -> Settings {
+    app.try_state::<Prefs>().map_or_else(Settings::default, |p| *lock(&p.cur))
+}
+
+/// Casillas de la bandeja, para reflejar lo que se cambie en la ventana.
+struct Checks {
+    toggles: Toggles,
+    autostart: CheckMenuItem<Wry>,
+}
+
+/// Aplica unos ajustes nuevos, los guarda y los deja como vigentes. Se puede
+/// llamar desde cualquier hilo: nada de aquí espera al hilo principal.
+fn apply_settings(app: &AppHandle, prefs: Settings) {
+    let state = app.state::<Prefs>();
+    *lock(&state.cur) = prefs;
     let overlay = app.state::<Overlay>();
     overlay.set_widget(prefs.widget);
     overlay.set_caps(prefs.caps);
@@ -266,7 +309,9 @@ fn apply_settings(app: &AppHandle, prefs: Settings, config_dir: Option<&Path>) {
     awake::set(prefs.keep_awake);
     screen::set(prefs.screen_care, settings::screen_off_minutes());
     on_top::set(app, prefs.on_top);
-    if let Some(dir) = config_dir {
+    timer::set_mode(prefs.timer);
+    player::set_enabled(prefs.free_idle);
+    if let Some(dir) = &state.dir {
         settings::save(dir, prefs);
     }
 }
@@ -274,16 +319,93 @@ fn apply_settings(app: &AppHandle, prefs: Settings, config_dir: Option<&Path>) {
 /// Chincheta de la barra de la ventana: cambia "Always on top" igual que la
 /// casilla del menú. Devuelve cómo queda.
 pub fn toggle_on_top(app: &AppHandle) -> bool {
-    let Some(toggles) = app.try_state::<Toggles>() else { return on_top::wanted() };
+    let Some(checks) = app.try_state::<Checks>() else { return on_top::wanted() };
     let on = !on_top::wanted();
-    let _ = toggles.on_top.set_checked(on);
-    apply_settings(app, toggles.read(), toggles.config_dir.as_deref());
+    let _ = checks.toggles.on_top.set_checked(on);
+    let mut prefs = current(app);
+    prefs.on_top = on;
+    apply_settings(app, prefs);
+    panel::refresh();
     on
+}
+
+fn set_key(s: &mut Settings, key: Key, on: bool) {
+    match key {
+        Key::Widget => s.widget = on,
+        Key::Others => s.others = on,
+        Key::Flat => s.flat = on,
+        Key::Caps => s.caps = on,
+        Key::KeepAwake => s.keep_awake = on,
+        Key::FreeIdle => s.free_idle = on,
+        Key::Autostart | Key::Global => {}
+    }
+}
+
+/// Abre la ventana de ajustes (o la trae al frente).
+pub fn open_settings(app: &AppHandle) {
+    let (reader, writer) = (app.clone(), app.clone());
+    panel::open(panel::Hooks {
+        read: Box::new(move || {
+            let state = reader.state::<Prefs>();
+            let prefs = *lock(&state.cur);
+            let custom_url = state.dir.as_deref().and_then(settings::load_custom_url).unwrap_or_default();
+            panel::Values {
+                prefs,
+                autostart: autostart::enabled(),
+                custom_url,
+                screen_minutes: settings::screen_off_minutes(),
+            }
+        }),
+        write: Box::new(move |change| {
+            let state = writer.state::<Prefs>();
+            let mut prefs = *lock(&state.cur);
+            match change {
+                Change::Toggle(Key::Autostart, on) => autostart::set(on),
+                Change::Toggle(key, on) => {
+                    set_key(&mut prefs, key, on);
+                    apply_settings(&writer, prefs);
+                }
+                Change::Timer(mode) => {
+                    prefs.timer = mode;
+                    apply_settings(&writer, prefs);
+                }
+                Change::Player(p) => {
+                    if prefs.player != p {
+                        prefs.player = p;
+                        apply_settings(&writer, prefs);
+                        player::reload(&writer);
+                    }
+                }
+                Change::ScreenCare(on, minutes) => {
+                    settings::set_screen_off_minutes(state.dir.as_deref(), minutes);
+                    prefs.screen_care = on;
+                    apply_settings(&writer, prefs);
+                }
+                Change::CustomUrl(url) => {
+                    if let Some(dir) = &state.dir {
+                        settings::save_custom_url(dir, &url);
+                    }
+                    prefs.player = Player::Custom;
+                    apply_settings(&writer, prefs);
+                    player::reload(&writer);
+                }
+            }
+            // Las casillas del menú, en el hilo principal y sin esperarlo.
+            let app = writer.clone();
+            let _ = writer.run_on_main_thread(move || {
+                if let Some(checks) = app.try_state::<Checks>() {
+                    checks.toggles.show(*lock(&app.state::<Prefs>().cur));
+                    let _ = checks.autostart.set_checked(autostart::enabled());
+                }
+            });
+        }),
+    });
 }
 
 /// Monta el menú y el icono de la bandeja. Orden (spec 2026-11-25):
 /// cabecera, reproducción, Pinned | Widget ›, casillas | actualizar, mostrar, salir.
-pub fn build(app: &App, prefs: Settings, config_dir: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+#[allow(clippy::too_many_lines)]
+pub fn build(app: &App, prefs: Settings, config_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
     let dark = dark_menu();
     let icon_item = |id: &str, text: &str, enabled: bool, icon: Icon| {
         IconMenuItem::with_id(app, id, text, enabled, Some(image(icon, dark)), None::<&str>)
@@ -298,15 +420,16 @@ pub fn build(app: &App, prefs: Settings, config_dir: Option<PathBuf>) -> Result<
 
     // Primero la última lista guardada; la página la actualiza al cargar.
     let pins_menu = Submenu::with_id_and_icon(app, "pins", "Pinned", true, Some(image(Icon::Pin, dark)))?;
-    let cached = config_dir.as_deref().map_or_else(Vec::new, settings::load_pins);
+    let cached = config_dir.map_or_else(Vec::new, settings::load_pins);
     fill_pins(app.handle(), &pins_menu, &cached);
     app.manage(Pins { menu: pins_menu.clone(), state: Mutex::new(PinsState { names: cached, ..Default::default() }) });
 
-    let toggles = Toggles::new(app, prefs, config_dir)?;
+    let toggles = Toggles::new(app, prefs)?;
     let widget_menu = Submenu::with_id_and_icon(app, "widget_menu", "Widget", true, Some(image(Icon::Widget, dark)))?;
     widget_menu.append_items(&[&toggles.widget, &toggles.others, &toggles.flat])?;
     let autostart_item =
         CheckMenuItem::with_id(app, "autostart", "Start with Windows", true, autostart::enabled(), None::<&str>)?;
+    let settings_item = icon_item("settings", "Settings\u{2026}", true, Icon::Settings)?;
 
     let menu = Menu::with_items(
         app,
@@ -324,6 +447,7 @@ pub fn build(app: &App, prefs: Settings, config_dir: Option<PathBuf>) -> Result<
             &toggles.keep_awake,
             &toggles.screen_care,
             &autostart_item,
+            &settings_item,
             &PredefinedMenuItem::separator(app)?,
             &update_item,
             &show_item,
@@ -336,6 +460,7 @@ pub fn build(app: &App, prefs: Settings, config_dir: Option<PathBuf>) -> Result<
             (play, Icon::Play),
             (next, Icon::Next),
             (prev, Icon::Prev),
+            (settings_item, Icon::Settings),
             (update_item.clone(), Icon::Update),
             (show_item, Icon::Show),
             (quit, Icon::Quit),
@@ -344,7 +469,7 @@ pub fn build(app: &App, prefs: Settings, config_dir: Option<PathBuf>) -> Result<
         dark: AtomicBool::new(dark),
     };
     app.state::<Header>().attach(app.handle(), header);
-    app.manage(toggles);
+    app.manage(Checks { toggles, autostart: autostart_item });
 
     let mut tray = TrayIconBuilder::with_id("main")
         .tooltip("MusicRG")
@@ -354,10 +479,13 @@ pub fn build(app: &App, prefs: Settings, config_dir: Option<PathBuf>) -> Result<
             "show" => show(app),
             "quit" => app.exit(0),
             "update" => updater::on_click(app),
+            "settings" => open_settings(app),
             "autostart" => {
-                autostart::set(autostart_item.is_checked().unwrap_or(false));
+                let checks = app.state::<Checks>();
+                autostart::set(checks.autostart.is_checked().unwrap_or(false));
                 // Lo que diga el registro, por si no se pudo escribir.
-                let _ = autostart_item.set_checked(autostart::enabled());
+                let _ = checks.autostart.set_checked(autostart::enabled());
+                panel::refresh();
             }
             id if id.starts_with("pin:") => {
                 if let Ok(i) = id[4..].parse::<usize>() {
@@ -365,8 +493,9 @@ pub fn build(app: &App, prefs: Settings, config_dir: Option<PathBuf>) -> Result<
                 }
             }
             "widget" | "caps" | "others" | "flat" | "keep_awake" | "screen_care" | "on_top" => {
-                let toggles = app.state::<Toggles>();
-                apply_settings(app, toggles.read(), toggles.config_dir.as_deref());
+                let base = *lock(&app.state::<Prefs>().cur);
+                apply_settings(app, app.state::<Checks>().toggles.read(base));
+                panel::refresh();
             }
             cmd @ ("toggle" | "next" | "prev") => {
                 if let Some(win) = app.get_webview_window("main") {

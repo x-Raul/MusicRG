@@ -1,13 +1,77 @@
-//! Ajustes en `%APPDATA%\MusicRG\settings.json`. Se cambian desde el menú de
-//! la bandeja; `widget_offset` solo a mano, por si el widget choca con algo, y
-//! `screen_off_minutes` también a mano (minutos de "Screen care").
+//! Ajustes en `%APPDATA%\MusicRG\settings.json`. Se cambian desde la
+//! ventana de ajustes o el menú de la bandeja; `widget_offset` solo a mano,
+//! por si el widget choca con algo, y `screen_off_minutes` también a mano
+//! (minutos de "Screen care").
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
 
 use serde_json::{json, Value};
 
-/// Cada campo es una casilla independiente del menú de la bandeja.
+/// Cuándo pide MusicRG la resolución de temporizador más fina (0,5 ms).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TimerMode {
+    /// Nunca: lo que decida Windows.
+    #[default]
+    Off,
+    /// Solo mientras hay un juego (o algo) a pantalla completa.
+    Auto,
+    /// Siempre que MusicRG esté abierta.
+    Always,
+}
+
+impl TimerMode {
+    pub const ALL: [Self; 3] = [Self::Off, Self::Auto, Self::Always];
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::Always => "always",
+        }
+    }
+}
+
+/// Qué web abre el reproductor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Player {
+    #[default]
+    AppleMusic,
+    Spotify,
+    YouTubeMusic,
+    /// La dirección que haya escrito el usuario (`custom_url`).
+    Custom,
+    /// Sin reproductor: MusicRG no abre ningún proceso de navegador
+    /// (WebView2); quedan el widget, el aviso y la bandeja.
+    Off,
+}
+
+impl Player {
+    pub const ALL: [Self; 5] = [Self::AppleMusic, Self::Spotify, Self::YouTubeMusic, Self::Custom, Self::Off];
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::AppleMusic => "apple_music",
+            Self::Spotify => "spotify",
+            Self::YouTubeMusic => "youtube_music",
+            Self::Custom => "custom",
+            Self::Off => "off",
+        }
+    }
+
+    /// Dirección fija de cada servicio (`None` para la propia y para Off).
+    pub fn url(self) -> Option<&'static str> {
+        match self {
+            Self::AppleMusic => Some("https://music.apple.com/"),
+            Self::Spotify => Some("https://open.spotify.com/"),
+            Self::YouTubeMusic => Some("https://music.youtube.com/"),
+            Self::Custom | Self::Off => None,
+        }
+    }
+}
+
+/// Cada campo es una opción independiente de la ventana de ajustes.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
@@ -25,6 +89,10 @@ pub struct Settings {
     pub screen_care: bool,
     /// Ventana del reproductor siempre por encima de las demás.
     pub on_top: bool,
+    pub timer: TimerMode,
+    /// Con el reproductor cerrado y nada sonando un rato, se descarga entero.
+    pub free_idle: bool,
+    pub player: Player,
 }
 
 impl Default for Settings {
@@ -37,12 +105,15 @@ impl Default for Settings {
             keep_awake: false,
             screen_care: false,
             on_top: false,
+            timer: TimerMode::Off,
+            free_idle: true,
+            player: Player::AppleMusic,
         }
     }
 }
 
 static OFFSET: OnceLock<Option<f32>> = OnceLock::new();
-static SCREEN_OFF: OnceLock<u32> = OnceLock::new();
+static SCREEN_OFF: AtomicU32 = AtomicU32::new(SCREEN_OFF_DEFAULT);
 
 /// Minutos sin actividad antes de apagar la pantalla, si no se cambian.
 pub const SCREEN_OFF_DEFAULT: u32 = 10;
@@ -54,7 +125,16 @@ pub fn widget_offset() -> Option<f32> {
 
 /// Minutos de "Screen care" (`screen_off_minutes`, de 1 a 240).
 pub fn screen_off_minutes() -> u32 {
-    SCREEN_OFF.get().copied().unwrap_or(SCREEN_OFF_DEFAULT)
+    SCREEN_OFF.load(Ordering::Relaxed)
+}
+
+/// Cambia los minutos de "Screen care" (de 1 a 240) y los guarda.
+pub fn set_screen_off_minutes(dir: Option<&std::path::Path>, minutes: u32) {
+    let m = minutes.clamp(1, 240);
+    SCREEN_OFF.store(m, Ordering::Relaxed);
+    if let Some(dir) = dir {
+        update(dir, |v| v["screen_off_minutes"] = json!(m));
+    }
 }
 
 fn minutes_from_json(v: &Value) -> u32 {
@@ -72,14 +152,21 @@ fn read(dir: &std::path::Path) -> Value {
 pub fn load(dir: &std::path::Path) -> Settings {
     let v = read(dir);
     let _ = OFFSET.set(v["widget_offset"].as_f64().map(|f| f as f32));
-    let _ = SCREEN_OFF.set(minutes_from_json(&v));
+    SCREEN_OFF.store(minutes_from_json(&v), Ordering::Relaxed);
     from_json(&v)
 }
 
-/// Lo que falte o no sea `bool` se queda con el valor por defecto.
+/// Lo que falte o no tenga el tipo esperado se queda con el valor por defecto.
 fn from_json(v: &Value) -> Settings {
     let d = Settings::default();
     let flag = |key: &str, default: bool| v[key].as_bool().unwrap_or(default);
+    // Antes era una casilla (`timer_resolution`): marcada equivale a "siempre".
+    let timer = match v["timer_mode"].as_str() {
+        Some(s) => TimerMode::ALL.into_iter().find(|m| m.key() == s).unwrap_or(d.timer),
+        None if v["timer_resolution"].as_bool() == Some(true) => TimerMode::Always,
+        None => d.timer,
+    };
+    let player = v["player"].as_str().and_then(|s| Player::ALL.into_iter().find(|p| p.key() == s)).unwrap_or(d.player);
     Settings {
         widget: flag("widget", d.widget),
         caps: flag("caps_lock_toast", d.caps),
@@ -88,6 +175,9 @@ fn from_json(v: &Value) -> Settings {
         keep_awake: flag("keep_awake", d.keep_awake),
         screen_care: flag("screen_care", d.screen_care),
         on_top: flag("always_on_top", d.on_top),
+        timer,
+        free_idle: flag("free_memory_when_idle", d.free_idle),
+        player,
     }
 }
 
@@ -100,7 +190,34 @@ pub fn save(dir: &std::path::Path, s: Settings) {
         v["keep_awake"] = json!(s.keep_awake);
         v["screen_care"] = json!(s.screen_care);
         v["always_on_top"] = json!(s.on_top);
+        v["timer_mode"] = json!(s.timer.key());
+        v["free_memory_when_idle"] = json!(s.free_idle);
+        v["player"] = json!(s.player.key());
+        if let Some(o) = v.as_object_mut() {
+            o.remove("timer_resolution");
+        }
     });
+}
+
+/// Dirección propia del reproductor ("custom"), ya comprobada.
+pub fn load_custom_url(dir: &std::path::Path) -> Option<String> {
+    read(dir)["custom_url"].as_str().and_then(clean_url)
+}
+
+pub fn save_custom_url(dir: &std::path::Path, url: &str) {
+    update(dir, |v| v["custom_url"] = json!(url));
+}
+
+/// Acepta solo `https://` con un host; añade el esquema si falta. Devuelve
+/// la dirección tal como se va a abrir.
+pub fn clean_url(input: &str) -> Option<String> {
+    let s = input.trim();
+    if s.is_empty() || s.len() > 2000 || s.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let s = if s.contains("://") { s.to_string() } else { format!("https://{s}") };
+    let url = tauri::Url::parse(&s).ok()?;
+    (url.scheme() == "https" && url.host_str().is_some_and(|h| h.contains('.'))).then(|| url.to_string())
 }
 
 /// Última lista de Destacar que mandó la página: así el menú de la bandeja
@@ -132,23 +249,28 @@ fn update(dir: &std::path::Path, f: impl FnOnce(&mut Value)) {
 mod tests {
     use serde_json::json;
 
-    use super::{from_json, minutes_from_json, Settings, SCREEN_OFF_DEFAULT};
+    use super::{clean_url, from_json, minutes_from_json, Player, Settings, TimerMode, SCREEN_OFF_DEFAULT};
 
     #[test]
     fn missing_keys_use_defaults() {
         assert_eq!(from_json(&serde_json::Value::Null), Settings::default());
-        assert_eq!(from_json(&json!({ "widget": "yes" })), Settings::default());
+        assert_eq!(from_json(&json!({ "widget": "yes", "timer_mode": "fast" })), Settings::default());
     }
 
     #[test]
-    fn reads_every_flag() {
+    fn reads_every_option() {
         let v = json!({
             "widget": false, "caps_lock_toast": false, "other_apps": false,
             "flat_bars": true, "keep_awake": true, "screen_care": true,
-            "always_on_top": true,
+            "always_on_top": true, "timer_mode": "auto",
+            "free_memory_when_idle": false, "player": "off",
         });
         let s = from_json(&v);
-        assert!(!s.widget && !s.caps && !s.others && s.flat && s.keep_awake && s.screen_care && s.on_top);
+        assert!(
+            !s.widget && !s.caps && !s.others && s.flat && s.keep_awake && s.screen_care && s.on_top && !s.free_idle
+        );
+        assert_eq!(s.timer, TimerMode::Auto);
+        assert_eq!(s.player, Player::Off);
     }
 
     #[test]
@@ -158,5 +280,24 @@ mod tests {
         assert_eq!(minutes_from_json(&json!({ "screen_off_minutes": 0 })), 1);
         assert_eq!(minutes_from_json(&json!({ "screen_off_minutes": 9999 })), 240);
         assert_eq!(minutes_from_json(&json!({ "screen_off_minutes": "x" })), SCREEN_OFF_DEFAULT);
+    }
+
+    #[test]
+    fn old_timer_checkbox_means_always() {
+        assert_eq!(from_json(&json!({ "timer_resolution": true })).timer, TimerMode::Always);
+        assert_eq!(from_json(&json!({ "timer_resolution": false })).timer, TimerMode::Off);
+        assert_eq!(from_json(&json!({ "timer_resolution": true, "timer_mode": "off" })).timer, TimerMode::Off);
+    }
+
+    #[test]
+    fn urls_are_https_only() {
+        assert_eq!(clean_url("music.youtube.com").as_deref(), Some("https://music.youtube.com/"));
+        assert_eq!(clean_url(" https://tidal.com/browse ").as_deref(), Some("https://tidal.com/browse"));
+        assert_eq!(clean_url("http://example.com"), None);
+        assert_eq!(clean_url("file:///C:/x.html"), None);
+        assert_eq!(clean_url("javascript:alert(1)"), None);
+        assert_eq!(clean_url("localhost"), None);
+        assert_eq!(clean_url("a b.com"), None);
+        assert_eq!(clean_url(""), None);
     }
 }
