@@ -23,11 +23,21 @@ pub struct Settings {
     pub keep_awake: bool,
     /// Apaga la pantalla tras unos minutos sin tocar ratón ni teclado.
     pub screen_care: bool,
+    /// Ventana del reproductor siempre por encima de las demás.
+    pub on_top: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { widget: true, caps: true, others: true, flat: false, keep_awake: false, screen_care: false }
+        Self {
+            widget: true,
+            caps: true,
+            others: true,
+            flat: false,
+            keep_awake: false,
+            screen_care: false,
+            on_top: false,
+        }
     }
 }
 
@@ -77,6 +87,7 @@ fn from_json(v: &Value) -> Settings {
         flat: flag("flat_bars", d.flat),
         keep_awake: flag("keep_awake", d.keep_awake),
         screen_care: flag("screen_care", d.screen_care),
+        on_top: flag("always_on_top", d.on_top),
     }
 }
 
@@ -88,6 +99,7 @@ pub fn save(dir: &std::path::Path, s: Settings) {
         v["flat_bars"] = json!(s.flat);
         v["keep_awake"] = json!(s.keep_awake);
         v["screen_care"] = json!(s.screen_care);
+        v["always_on_top"] = json!(s.on_top);
     });
 }
 
@@ -133,9 +145,10 @@ mod tests {
         let v = json!({
             "widget": false, "caps_lock_toast": false, "other_apps": false,
             "flat_bars": true, "keep_awake": true, "screen_care": true,
+            "always_on_top": true,
         });
         let s = from_json(&v);
-        assert!(!s.widget && !s.caps && !s.others && s.flat && s.keep_awake && s.screen_care);
+        assert!(!s.widget && !s.caps && !s.others && s.flat && s.keep_awake && s.screen_care && s.on_top);
     }
 
     #[test]
