@@ -17,7 +17,7 @@ use crate::lock::lock;
 use crate::menu_icons::{dark_menu, image, Icon};
 use crate::overlay::{NowPlaying, Overlay};
 use crate::settings::{self, Settings};
-use crate::{autostart, awake, screen, show, updater};
+use crate::{autostart, awake, on_top, screen, show, updater};
 
 /// Máximo de caracteres de la cabecera, contando la elipsis: no más ancha
 /// que "Show other apps in widget", para que el menú no se ensanche.
@@ -215,10 +215,13 @@ struct Toggles {
     caps: CheckMenuItem<Wry>,
     keep_awake: CheckMenuItem<Wry>,
     screen_care: CheckMenuItem<Wry>,
+    on_top: CheckMenuItem<Wry>,
+    /// Dónde se guardan los ajustes.
+    config_dir: Option<PathBuf>,
 }
 
 impl Toggles {
-    fn new(app: &App, prefs: Settings) -> tauri::Result<Self> {
+    fn new(app: &App, prefs: Settings, config_dir: Option<PathBuf>) -> tauri::Result<Self> {
         let check = |id: &str, text: &str, on: bool| CheckMenuItem::with_id(app, id, text, true, on, None::<&str>);
         Ok(Self {
             widget: check("widget", "Taskbar widget", prefs.widget)?,
@@ -231,6 +234,8 @@ impl Toggles {
                 &format!("Screen care ({} min)", settings::screen_off_minutes()),
                 prefs.screen_care,
             )?,
+            on_top: check("on_top", "Always on top", prefs.on_top)?,
+            config_dir,
         })
     }
 
@@ -245,6 +250,7 @@ impl Toggles {
             flat: on(&self.flat, d.flat),
             keep_awake: on(&self.keep_awake, d.keep_awake),
             screen_care: on(&self.screen_care, d.screen_care),
+            on_top: on(&self.on_top, d.on_top),
         }
     }
 }
@@ -259,9 +265,20 @@ fn apply_settings(app: &AppHandle, prefs: Settings, config_dir: Option<&Path>) {
     overlay.set_flat(prefs.flat);
     awake::set(prefs.keep_awake);
     screen::set(prefs.screen_care, settings::screen_off_minutes());
+    on_top::set(app, prefs.on_top);
     if let Some(dir) = config_dir {
         settings::save(dir, prefs);
     }
+}
+
+/// Chincheta de la barra de la ventana: cambia "Always on top" igual que la
+/// casilla del menú. Devuelve cómo queda.
+pub fn toggle_on_top(app: &AppHandle) -> bool {
+    let Some(toggles) = app.try_state::<Toggles>() else { return on_top::wanted() };
+    let on = !on_top::wanted();
+    let _ = toggles.on_top.set_checked(on);
+    apply_settings(app, toggles.read(), toggles.config_dir.as_deref());
+    on
 }
 
 /// Monta el menú y el icono de la bandeja. Orden (spec 2026-11-25):
@@ -285,7 +302,7 @@ pub fn build(app: &App, prefs: Settings, config_dir: Option<PathBuf>) -> Result<
     fill_pins(app.handle(), &pins_menu, &cached);
     app.manage(Pins { menu: pins_menu.clone(), state: Mutex::new(PinsState { names: cached, ..Default::default() }) });
 
-    let toggles = Toggles::new(app, prefs)?;
+    let toggles = Toggles::new(app, prefs, config_dir)?;
     let widget_menu = Submenu::with_id_and_icon(app, "widget_menu", "Widget", true, Some(image(Icon::Widget, dark)))?;
     widget_menu.append_items(&[&toggles.widget, &toggles.others, &toggles.flat])?;
     let autostart_item =
@@ -302,6 +319,7 @@ pub fn build(app: &App, prefs: Settings, config_dir: Option<PathBuf>) -> Result<
             &pins_menu,
             &PredefinedMenuItem::separator(app)?,
             &widget_menu,
+            &toggles.on_top,
             &toggles.caps,
             &toggles.keep_awake,
             &toggles.screen_care,
@@ -326,6 +344,7 @@ pub fn build(app: &App, prefs: Settings, config_dir: Option<PathBuf>) -> Result<
         dark: AtomicBool::new(dark),
     };
     app.state::<Header>().attach(app.handle(), header);
+    app.manage(toggles);
 
     let mut tray = TrayIconBuilder::with_id("main")
         .tooltip("MusicRG")
@@ -345,8 +364,9 @@ pub fn build(app: &App, prefs: Settings, config_dir: Option<PathBuf>) -> Result<
                     play_pin(app, i);
                 }
             }
-            "widget" | "caps" | "others" | "flat" | "keep_awake" | "screen_care" => {
-                apply_settings(app, toggles.read(), config_dir.as_deref());
+            "widget" | "caps" | "others" | "flat" | "keep_awake" | "screen_care" | "on_top" => {
+                let toggles = app.state::<Toggles>();
+                apply_settings(app, toggles.read(), toggles.config_dir.as_deref());
             }
             cmd @ ("toggle" | "next" | "prev") => {
                 if let Some(win) = app.get_webview_window("main") {

@@ -7,6 +7,7 @@ mod awake;
 mod lock;
 mod media;
 mod menu_icons;
+mod on_top;
 mod overlay;
 mod screen;
 mod settings;
@@ -100,10 +101,14 @@ fn pins(app: AppHandle, pins: tauri::State<Pins>, names: Vec<String>) {
 }
 
 /// Botones propios de la ventana (no hay barra de título nativa). Solo estas
-/// cuatro acciones: la página no recibe acceso general a la API de ventanas.
+/// acciones: la página no recibe acceso general a la API de ventanas.
+/// Devuelve si "Always on top" está activo, para pintar la chincheta.
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
-fn window_ctl(window: WebviewWindow, action: String) {
+fn window_ctl(window: WebviewWindow, action: String) -> bool {
+    if action == "on_top" {
+        return tray::toggle_on_top(window.app_handle());
+    }
     let _ = match action.as_str() {
         "minimize" => window.minimize(),
         "maximize" if window.is_maximized().unwrap_or(false) => window.unmaximize(),
@@ -111,8 +116,9 @@ fn window_ctl(window: WebviewWindow, action: String) {
         // Igual que la X nativa: pasa por `CloseRequested` y se esconde en la bandeja.
         "close" => window.close(),
         "drag" => window.start_dragging(),
-        _ => Ok(()),
+        _ => Ok(()), // "state": solo pregunta
     };
+    on_top::wanted()
 }
 
 fn main() {
@@ -134,6 +140,7 @@ fn main() {
             overlay.set_flat(prefs.flat);
             app.manage(overlay);
             awake::set(prefs.keep_awake);
+            on_top::init(prefs.on_top);
             screen::set(prefs.screen_care, settings::screen_off_minutes());
             // La cabecera del menú existe desde ya: lo que suene antes de que
             // se monte el menú queda guardado y se muestra al montarlo.
@@ -157,6 +164,12 @@ fn main() {
             tray::build(app, prefs, config_dir)
         })
         .on_window_event(|window, event| {
+            // Maximizar suspende "Always on top"; restaurar lo devuelve.
+            if let WindowEvent::Resized(_) = event {
+                if let Some(win) = window.app_handle().get_webview_window(window.label()) {
+                    on_top::apply(&win);
+                }
+            }
             // Cerrar = esconder en la bandeja; la música sigue. "Quit" está en el menú.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
@@ -254,7 +267,9 @@ fn build_player(app: &AppHandle, visible: bool) -> Result<(), Box<dyn std::error
         .background_color(tauri::webview::Color(BG.0, BG.1, BG.2, 255))
         .additional_browser_args(&browser_args())
         .initialization_script(&script)
+        .always_on_top(on_top::wanted())
         .build()?;
+    on_top::created();
     remember_browser_pid(&win);
     if visible {
         let _ = win.set_focus();

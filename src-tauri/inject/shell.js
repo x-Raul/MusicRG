@@ -57,6 +57,10 @@
       if (!m || !p) return;
       m.setQueue({ [p.kind]: p.id, startPlaying: true }).catch(() => {});
     },
+    // Rust avisa cuando "Always on top" cambia desde la bandeja.
+    setOnTop(on) {
+      showOnTop(on);
+    },
   };
 
   // La lista sale de la API de la biblioteca (la misma que usa la página).
@@ -111,12 +115,23 @@
 
   // Ventana sin barra de título: botones propios arriba a la derecha y la
   // franja superior de la página sirve para arrastrar (doble clic = maximizar).
+  // Rust contesta si "Always on top" está activo: así la chincheta siempre
+  // dice la verdad, también tras recargar la página.
   const ctl = (action) => {
     try {
       const ipc = window.__TAURI_INTERNALS__;
-      if (ipc) ipc.invoke("window_ctl", { action }).catch(() => {});
+      if (ipc) ipc.invoke("window_ctl", { action }).then(showOnTop, () => {});
     } catch (_) {}
   };
+  let pin = null;
+  let onTop = false;
+  function showOnTop(on) {
+    onTop = on === true;
+    if (!pin) return;
+    pin.textContent = onTop ? "\uE842" : "\uE718"; // chincheta llena / vacía
+    pin.title = onTop ? "Stop keeping on top" : "Always on top";
+    pin.setAttribute("aria-pressed", String(onTop));
+  }
   const DRAG_H = 32;
   let host = null;
   const mountChrome = () => {
@@ -133,6 +148,7 @@
       button:active { background: rgba(255,255,255,.05); }
       button.x:hover { background: #c42b1c; color: #fff; }
       button.x:active { background: #b22a1b; }
+      button.pin[aria-pressed="true"] { color: var(--rg-accent, #ff4d6d); }
     `);
     root.adoptedStyleSheets = [css];
     const btn = (action, glyph, label, cls) => {
@@ -145,6 +161,9 @@
       root.append(b);
       return b;
     };
+    pin = btn("on_top", "\uE718", "Always on top", "pin");
+    showOnTop(onTop);
+    ctl("state");
     btn("minimize", "", "Minimize");
     const max = btn("maximize", "", "Maximize");
     btn("close", "", "Close", "x");
