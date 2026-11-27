@@ -1,5 +1,6 @@
 //! Ajustes en `%APPDATA%\MusicRG\settings.json`. Se cambian desde el menú de
-//! la bandeja; `widget_offset` solo a mano, por si el widget choca con algo.
+//! la bandeja; `widget_offset` solo a mano, por si el widget choca con algo, y
+//! `screen_off_minutes` también a mano (minutos de "Screen care").
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -20,19 +21,34 @@ pub struct Settings {
     pub flat: bool,
     /// Impide que el PC se suspenda y que se apague la pantalla.
     pub keep_awake: bool,
+    /// Apaga la pantalla tras unos minutos sin tocar ratón ni teclado.
+    pub screen_care: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { widget: true, caps: true, others: true, flat: false, keep_awake: false }
+        Self { widget: true, caps: true, others: true, flat: false, keep_awake: false, screen_care: false }
     }
 }
 
 static OFFSET: OnceLock<Option<f32>> = OnceLock::new();
+static SCREEN_OFF: OnceLock<u32> = OnceLock::new();
+
+/// Minutos sin actividad antes de apagar la pantalla, si no se cambian.
+pub const SCREEN_OFF_DEFAULT: u32 = 10;
 
 /// Distancia (en píxeles a escala 100 %) desde el borde izquierdo de la barra.
 pub fn widget_offset() -> Option<f32> {
     OFFSET.get().copied().flatten()
+}
+
+/// Minutos de "Screen care" (`screen_off_minutes`, de 1 a 240).
+pub fn screen_off_minutes() -> u32 {
+    SCREEN_OFF.get().copied().unwrap_or(SCREEN_OFF_DEFAULT)
+}
+
+fn minutes_from_json(v: &Value) -> u32 {
+    v["screen_off_minutes"].as_u64().map_or(SCREEN_OFF_DEFAULT, |m| m.clamp(1, 240) as u32)
 }
 
 fn path(dir: &std::path::Path) -> PathBuf {
@@ -46,6 +62,7 @@ fn read(dir: &std::path::Path) -> Value {
 pub fn load(dir: &std::path::Path) -> Settings {
     let v = read(dir);
     let _ = OFFSET.set(v["widget_offset"].as_f64().map(|f| f as f32));
+    let _ = SCREEN_OFF.set(minutes_from_json(&v));
     from_json(&v)
 }
 
@@ -59,6 +76,7 @@ fn from_json(v: &Value) -> Settings {
         others: flag("other_apps", d.others),
         flat: flag("flat_bars", d.flat),
         keep_awake: flag("keep_awake", d.keep_awake),
+        screen_care: flag("screen_care", d.screen_care),
     }
 }
 
@@ -69,6 +87,7 @@ pub fn save(dir: &std::path::Path, s: Settings) {
         v["other_apps"] = json!(s.others);
         v["flat_bars"] = json!(s.flat);
         v["keep_awake"] = json!(s.keep_awake);
+        v["screen_care"] = json!(s.screen_care);
     });
 }
 
@@ -101,7 +120,7 @@ fn update(dir: &std::path::Path, f: impl FnOnce(&mut Value)) {
 mod tests {
     use serde_json::json;
 
-    use super::{from_json, Settings};
+    use super::{from_json, minutes_from_json, Settings, SCREEN_OFF_DEFAULT};
 
     #[test]
     fn missing_keys_use_defaults() {
@@ -113,9 +132,18 @@ mod tests {
     fn reads_every_flag() {
         let v = json!({
             "widget": false, "caps_lock_toast": false, "other_apps": false,
-            "flat_bars": true, "keep_awake": true,
+            "flat_bars": true, "keep_awake": true, "screen_care": true,
         });
         let s = from_json(&v);
-        assert!(!s.widget && !s.caps && !s.others && s.flat && s.keep_awake);
+        assert!(!s.widget && !s.caps && !s.others && s.flat && s.keep_awake && s.screen_care);
+    }
+
+    #[test]
+    fn screen_off_minutes_are_clamped() {
+        assert_eq!(minutes_from_json(&serde_json::Value::Null), SCREEN_OFF_DEFAULT);
+        assert_eq!(minutes_from_json(&json!({ "screen_off_minutes": 5 })), 5);
+        assert_eq!(minutes_from_json(&json!({ "screen_off_minutes": 0 })), 1);
+        assert_eq!(minutes_from_json(&json!({ "screen_off_minutes": 9999 })), 240);
+        assert_eq!(minutes_from_json(&json!({ "screen_off_minutes": "x" })), SCREEN_OFF_DEFAULT);
     }
 }

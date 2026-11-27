@@ -8,6 +8,7 @@ mod lock;
 mod media;
 mod menu_icons;
 mod overlay;
+mod screen;
 mod settings;
 mod tray;
 mod updater;
@@ -133,6 +134,7 @@ fn main() {
             overlay.set_flat(prefs.flat);
             app.manage(overlay);
             awake::set(prefs.keep_awake);
+            screen::set(prefs.screen_care, settings::screen_off_minutes());
             // La cabecera del menú existe desde ya: lo que suene antes de que
             // se monte el menú queda guardado y se muestra al montarlo.
             app.manage(Header::new(prefs.others));

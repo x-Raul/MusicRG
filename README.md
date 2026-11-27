@@ -57,7 +57,7 @@ Para desinstalarla: *Configuración → Aplicaciones → MusicRG → Desinstalar
 | Abrir la app | Carga Apple Music. Inicias sesión con tu Apple ID como en la web, y la sesión se queda guardada. |
 | Cerrar la ventana (✕) | La ventana se esconde en la bandeja del sistema y **la música sigue sonando**. |
 | Clic izquierdo en el icono de la bandeja | Vuelve a mostrar la ventana y la pone delante. |
-| Clic derecho en el icono de la bandeja | Abre un menú con **Play / Pause**, **Next**, **Previous**, **Pinned** (tus elementos de *Destacar*, para ponerlos a sonar), las casillas **Taskbar widget**, **Show other apps in widget**, **Flat audio bars**, **Caps Lock toast** y **Start with Windows**, **Check for updates**, **Show MusicRG** y **Quit**. |
+| Clic derecho en el icono de la bandeja | Abre un menú con **Play / Pause**, **Next**, **Previous**, **Pinned** (tus elementos de *Destacar*, para ponerlos a sonar), las casillas **Taskbar widget**, **Show other apps in widget**, **Flat audio bars**, **Caps Lock toast**, **Keep PC awake**, **Screen care** y **Start with Windows**, **Check for updates**, **Show MusicRG** y **Quit**. |
 | Iniciar con Windows | Al arrancar el PC solo se encienden el widget, el aviso de Bloq Mayús y la bandeja (unos 5 MB). Apple Music se carga cuando abres la ventana o eliges algo de **Pinned**. |
 | Clic en el widget de la barra de tareas | Muestra la ventana de MusicRG. |
 | Volver a abrir MusicRG con la app ya en marcha | No arranca otra copia: muestra la que ya estaba abierta. |
@@ -119,6 +119,8 @@ Clic derecho en el icono de la bandeja → submenú **Widget** (**Taskbar widget
 ### Menú de la bandeja
 
 Arriba muestra lo que suena (lo mismo que el widget, recortado para que el menú no se ensanche). Luego vienen los controles, **Pinned**, el submenú **Widget**, las opciones con casilla y, al final, actualizar, mostrar y salir. **Keep PC awake** impide que el PC se suspenda y que se apague la pantalla mientras esté marcada.
+
+**Screen care** cuida pantallas OLED/LED: si pasas 10 minutos sin tocar ratón ni teclado, apaga la pantalla (como el botón del monitor). La música sigue sonando y se enciende otra vez al mover el ratón o pulsar una tecla. No la apaga si hay algo a pantalla completa (vídeo, juego, presentación). Funciona también con **Keep PC awake** marcado: así el PC no se suspende pero la pantalla descansa. Los minutos se cambian a mano en `%APPDATA%\MusicRG\settings.json` con `"screen_off_minutes"` (de 1 a 240) y reiniciando MusicRG.
 
 Los iconos son SVG propios de 16 px en `src-tauri/icons/menu/`. Al compilar, `build.rs` los pasa a imagen en dos tintas (menú claro y oscuro), así que la app no decodifica nada al ejecutarse.
 
@@ -262,6 +264,7 @@ MusicRG/
       ├─ tray.rs             # Menú de la bandeja y su cabecera
       ├─ menu_icons.rs       # Iconos del menú (rasterizados por build.rs)
       ├─ awake.rs            # Keep PC awake (petición de energía de Windows)
+      ├─ screen.rs           # Screen care (apaga la pantalla tras N min sin actividad)
       ├─ lock.rs             # Mutex sin unwrap()
       ├─ overlay.rs          # Widget de la barra de tareas y aviso de Bloq Mayús
       ├─ audio.rs            # Captura de audio (MusicRG u otras apps) + FFT → niveles
@@ -398,7 +401,7 @@ powershell -File scripts/publish.ps1
 | --- | --- |
 | `%LOCALAPPDATA%\com.xraul.musicrg\` | Perfil de WebView2: cookies, sesión de Apple ID, caché. |
 | `%APPDATA%\MusicRG\theme.css` | Tu tema personalizado (solo si lo creas). |
-| `%APPDATA%\MusicRG\settings.json` | Opciones de la bandeja (widget, aviso de Bloq Mayús, Keep PC awake...), la última lista de Pinned y `widget_offset` si lo pones. |
+| `%APPDATA%\MusicRG\settings.json` | Opciones de la bandeja (widget, aviso de Bloq Mayús, Keep PC awake, Screen care...), la última lista de Pinned, y `widget_offset` y `screen_off_minutes` si los pones. |
 
 Para **cerrar sesión del todo** o empezar de cero: sal de MusicRG desde la bandeja y borra `%LOCALAPPDATA%\com.xraul.musicrg\`. Desinstalar la app no borra estas carpetas.
 
