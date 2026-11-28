@@ -115,6 +115,15 @@ impl Default for Settings {
 static OFFSET: OnceLock<Option<f32>> = OnceLock::new();
 static SCREEN_OFF: AtomicU32 = AtomicU32::new(SCREEN_OFF_DEFAULT);
 
+/// Minutos que se ofrecen para "Screen care" (en la ventana y en la bandeja).
+pub const SCREEN_MINUTES: [u32; 5] = [5, 10, 15, 30, 60];
+
+/// Posición en `SCREEN_MINUTES` del valor más cercano a `m` (puede venir
+/// otro a mano en el JSON).
+pub fn nearest_screen_minutes(m: u32) -> usize {
+    (0..SCREEN_MINUTES.len()).min_by_key(|&i| SCREEN_MINUTES[i].abs_diff(m)).unwrap_or(1)
+}
+
 /// Minutos sin actividad antes de apagar la pantalla, si no se cambian.
 pub const SCREEN_OFF_DEFAULT: u32 = 10;
 

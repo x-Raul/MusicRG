@@ -18,7 +18,7 @@ use crate::menu_icons::{dark_menu, image, Icon};
 use crate::overlay::{NowPlaying, Overlay};
 use crate::panel::{self, Change, Key};
 use crate::settings::Player;
-use crate::settings::{self, Settings};
+use crate::settings::{self, Settings, SCREEN_MINUTES};
 use crate::{autostart, awake, on_top, player, screen, show, timer, updater};
 
 /// Máximo de caracteres de la cabecera, contando la elipsis: no más ancha
@@ -209,11 +209,6 @@ fn play_pin(app: &AppHandle, i: usize) {
     }
 }
 
-/// Texto de la casilla de "Screen care", con sus minutos.
-fn screen_label() -> String {
-    format!("Screen care ({} min)", settings::screen_off_minutes())
-}
-
 /// Casillas de ajustes del menú de la bandeja.
 struct Toggles {
     widget: CheckMenuItem<Wry>,
@@ -221,7 +216,8 @@ struct Toggles {
     flat: CheckMenuItem<Wry>,
     caps: CheckMenuItem<Wry>,
     keep_awake: CheckMenuItem<Wry>,
-    screen_care: CheckMenuItem<Wry>,
+    /// "Screen care" como opciones: Off y luego `SCREEN_MINUTES`.
+    screen: Vec<CheckMenuItem<Wry>>,
     on_top: CheckMenuItem<Wry>,
 }
 
@@ -234,7 +230,13 @@ impl Toggles {
             flat: check("flat", "Flat audio bars", prefs.flat)?,
             caps: check("caps", "Caps Lock toast", prefs.caps)?,
             keep_awake: check("keep_awake", "Keep PC awake", prefs.keep_awake)?,
-            screen_care: check("screen_care", &screen_label(), prefs.screen_care)?,
+            screen: std::iter::once(0)
+                .chain(SCREEN_MINUTES)
+                .map(|m| {
+                    let text = if m == 0 { "Screen care off".to_owned() } else { format!("Screen off after {m} min") };
+                    check(&format!("screen:{m}"), &text, false)
+                })
+                .collect::<tauri::Result<_>>()?,
             on_top: check("on_top", "Always on top", prefs.on_top)?,
         })
     }
@@ -249,7 +251,6 @@ impl Toggles {
             others: on(&self.others, base.others),
             flat: on(&self.flat, base.flat),
             keep_awake: on(&self.keep_awake, base.keep_awake),
-            screen_care: on(&self.screen_care, base.screen_care),
             on_top: on(&self.on_top, base.on_top),
             ..base
         }
@@ -263,12 +264,15 @@ impl Toggles {
             (&self.flat, s.flat),
             (&self.caps, s.caps),
             (&self.keep_awake, s.keep_awake),
-            (&self.screen_care, s.screen_care),
             (&self.on_top, s.on_top),
         ] {
             let _ = item.set_checked(on);
         }
-        let _ = self.screen_care.set_text(screen_label());
+        // Una sola marcada, como botones de radio.
+        let cur = if s.screen_care { settings::nearest_screen_minutes(settings::screen_off_minutes()) + 1 } else { 0 };
+        for (i, item) in self.screen.iter().enumerate() {
+            let _ = item.set_checked(i == cur);
+        }
     }
 }
 
@@ -425,8 +429,24 @@ pub fn build(app: &App, prefs: Settings, config_dir: Option<&Path>) -> Result<()
     app.manage(Pins { menu: pins_menu.clone(), state: Mutex::new(PinsState { names: cached, ..Default::default() }) });
 
     let toggles = Toggles::new(app, prefs)?;
+    toggles.show(prefs);
+    // Lo que se toca a menudo, a mano; lo demás, agrupado en dos submenús.
+    // "Start with Windows" solo está en la ventana de ajustes.
     let widget_menu = Submenu::with_id_and_icon(app, "widget_menu", "Widget", true, Some(image(Icon::Widget, dark)))?;
-    widget_menu.append_items(&[&toggles.widget, &toggles.others, &toggles.flat])?;
+    widget_menu.append_items(&[
+        &toggles.widget,
+        &toggles.others,
+        &toggles.flat,
+        &PredefinedMenuItem::separator(app)?,
+        &toggles.caps,
+    ])?;
+    let power_menu =
+        Submenu::with_id_and_icon(app, "power_menu", "Screen & power", true, Some(image(Icon::Power, dark)))?;
+    power_menu.append(&toggles.keep_awake)?;
+    power_menu.append(&PredefinedMenuItem::separator(app)?)?;
+    for item in &toggles.screen {
+        power_menu.append(item)?;
+    }
     let autostart_item =
         CheckMenuItem::with_id(app, "autostart", "Start with Windows", true, autostart::enabled(), None::<&str>)?;
     let settings_item = icon_item("settings", "Settings\u{2026}", true, Icon::Settings)?;
@@ -442,11 +462,8 @@ pub fn build(app: &App, prefs: Settings, config_dir: Option<&Path>) -> Result<()
             &pins_menu,
             &PredefinedMenuItem::separator(app)?,
             &widget_menu,
+            &power_menu,
             &toggles.on_top,
-            &toggles.caps,
-            &toggles.keep_awake,
-            &toggles.screen_care,
-            &autostart_item,
             &settings_item,
             &PredefinedMenuItem::separator(app)?,
             &update_item,
@@ -465,7 +482,7 @@ pub fn build(app: &App, prefs: Settings, config_dir: Option<&Path>) -> Result<()
             (show_item, Icon::Show),
             (quit, Icon::Quit),
         ],
-        subs: vec![(pins_menu, Icon::Pin), (widget_menu, Icon::Widget)],
+        subs: vec![(pins_menu, Icon::Pin), (widget_menu, Icon::Widget), (power_menu, Icon::Power)],
         dark: AtomicBool::new(dark),
     };
     app.state::<Header>().attach(app.handle(), header);
@@ -492,7 +509,20 @@ pub fn build(app: &App, prefs: Settings, config_dir: Option<&Path>) -> Result<()
                     play_pin(app, i);
                 }
             }
-            "widget" | "caps" | "others" | "flat" | "keep_awake" | "screen_care" | "on_top" => {
+            id if id.starts_with("screen:") => {
+                if let Ok(m) = id[7..].parse::<u32>() {
+                    let mut prefs = *lock(&app.state::<Prefs>().cur);
+                    if m > 0 {
+                        let dir = app.state::<Prefs>().dir.clone();
+                        settings::set_screen_off_minutes(dir.as_deref(), m);
+                    }
+                    prefs.screen_care = m > 0;
+                    apply_settings(app, prefs);
+                    app.state::<Checks>().toggles.show(prefs);
+                    panel::refresh();
+                }
+            }
+            "widget" | "caps" | "others" | "flat" | "keep_awake" | "on_top" => {
                 let base = *lock(&app.state::<Prefs>().cur);
                 apply_settings(app, app.state::<Checks>().toggles.read(base));
                 panel::refresh();

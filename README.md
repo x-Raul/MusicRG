@@ -57,7 +57,7 @@ Para desinstalarla: *Configuración → Aplicaciones → MusicRG → Desinstalar
 | Abrir la app | Carga Apple Music. Inicias sesión con tu Apple ID como en la web, y la sesión se queda guardada. |
 | Cerrar la ventana (✕) | La ventana se esconde en la bandeja del sistema y **la música sigue sonando**. |
 | Clic izquierdo en el icono de la bandeja | Vuelve a mostrar la ventana y la pone delante. |
-| Clic derecho en el icono de la bandeja | Abre un menú con **Play / Pause**, **Next**, **Previous**, **Pinned** (tus elementos de *Destacar*, para ponerlos a sonar), las casillas **Taskbar widget**, **Show other apps in widget**, **Flat audio bars**, **Always on top**, **Caps Lock toast**, **Keep PC awake**, **Screen care** y **Start with Windows**, **Check for updates**, **Show MusicRG** y **Quit**. |
+| Clic derecho en el icono de la bandeja | Abre un menú con **Play / Pause**, **Next**, **Previous**, **Pinned** (tus elementos de *Destacar*, para ponerlos a sonar), **Widget ›** (Taskbar widget, Show other apps, Flat audio bars y Caps Lock toast), **Screen & power ›** (Keep PC awake y los minutos de Screen care, u Off), **Always on top**, **Settings…** (donde también está Start with Windows), **Check for updates**, **Show MusicRG** y **Quit**. |
 | Iniciar con Windows | Al arrancar el PC solo se encienden el widget, el aviso de Bloq Mayús y la bandeja (unos 5 MB). Apple Music se carga cuando abres la ventana o eliges algo de **Pinned**. |
 | Clic en el widget de la barra de tareas | Muestra la ventana de MusicRG. |
 | Chincheta de la barra de la ventana (o **Always on top** en la bandeja) | La ventana se queda por encima de las demás, para usarla de minirreproductor. Mientras está maximizada no se aplica. |

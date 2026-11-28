@@ -19,6 +19,7 @@ pub enum Icon {
     Prev,
     Pin,
     Widget,
+    Power,
     Settings,
     Update,
     Show,
@@ -37,13 +38,14 @@ macro_rules! tints {
 
 impl Icon {
     #[cfg(test)]
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Music,
         Self::Play,
         Self::Next,
         Self::Prev,
         Self::Pin,
         Self::Widget,
+        Self::Power,
         Self::Settings,
         Self::Update,
         Self::Show,
@@ -59,6 +61,7 @@ impl Icon {
             Self::Prev => tints!("prev"),
             Self::Pin => tints!("pin"),
             Self::Widget => tints!("widget"),
+            Self::Power => tints!("power"),
             Self::Settings => tints!("settings"),
             Self::Update => tints!("update"),
             Self::Show => tints!("show"),

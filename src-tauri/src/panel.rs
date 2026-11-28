@@ -40,7 +40,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_numerics::{Matrix3x2, Vector2};
 
-use crate::settings::{self, Player, Settings, TimerMode};
+use crate::settings::{self, Player, Settings, TimerMode, SCREEN_MINUTES};
 use crate::timer::{self, Global, Res};
 
 /// Lo que se puede cambiar desde la ventana.
@@ -312,9 +312,6 @@ enum Pick {
 
 const PICKS: [Pick; 3] = [Pick::Timer, Pick::Player, Pick::Screen];
 
-/// Minutos que ofrece "Screen care" (tras "Off").
-const SCREEN_MINUTES: [u32; 5] = [5, 10, 15, 30, 60];
-
 impl Pick {
     fn labels(self) -> &'static [&'static str] {
         match self {
@@ -459,6 +456,8 @@ fn subtitle(key: Key, ui: &Ui) -> String {
         Key::Others => "Browser, Spotify\u{2026} when MusicRG is idle".into(),
         Key::Flat => "Bars rest on a baseline".into(),
         Key::Caps => "Shows when Caps Lock turns on or off".into(),
+        // Screen care sigue apagando la pantalla aunque esto esté activo.
+        Key::KeepAwake if ui.vals.prefs.screen_care => "No sleep; Screen care still turns the screen off".into(),
         Key::KeepAwake => "No sleep, the screen stays on".into(),
         Key::Autostart => "Only the widget and tray at sign-in".into(),
         Key::FreeIdle => "Unload the player after 30 min closed and silent".into(),
@@ -908,11 +907,7 @@ impl Ui {
             Pick::Player => Player::ALL.iter().position(|p| *p == self.vals.prefs.player).unwrap_or(0),
             Pick::Screen if !self.vals.prefs.screen_care => 0,
             // Minutos puestos a mano en el JSON: se marca el más cercano.
-            Pick::Screen => {
-                let m = self.vals.screen_minutes;
-                let near = (0..SCREEN_MINUTES.len()).min_by_key(|&i| SCREEN_MINUTES[i].abs_diff(m)).unwrap_or(1);
-                near + 1
-            }
+            Pick::Screen => settings::nearest_screen_minutes(self.vals.screen_minutes) + 1,
         }
     }
 

@@ -49,6 +49,11 @@ mod imp {
     }
 
     pub fn set(on: bool) {
+        // Una build de debug nunca se registra: Windows la arrancaría al
+        // iniciar sesión con consola y desde `target\`, pisando la instalada.
+        if cfg!(debug_assertions) {
+            return;
+        }
         if on {
             let Some(cmd) = command() else { return };
             let wide = HSTRING::from(cmd);
